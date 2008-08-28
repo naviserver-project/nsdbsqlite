@@ -1,0 +1,34 @@
+SQLite database driver for NaviServer 4.x
+Release 0.9
+vlad@crystalballinc.com
+
+This is NaviServer module for database driver to access 
+SQLite databases(http://www.sqlite.org).
+
+The driver is based on nssqlite3 from Aolserver 4.5 by 
+Dossy Shiobara <dossy@panoptic.com>
+
+/*--------------------------------------------------------------------*/
+
+Compiling and Installing
+
+To compile this driver, you'll need to have SQLite3 installed.
+
+Configuration
+
+ns_section      "ns/db/drivers"
+ns_param        sqlite                   nsdbsqlite.so
+
+ns_section      "ns/db/pools"
+ns_param        sqlite                   "SQLite"
+
+ns_section      "ns/db/pool/sqlite"
+ns_param        driver                   sqlite
+ns_param        connections              1
+ns_param        datasource               /tmp/sqlite.db
+ns_param        verbose                  off
+
+  
+Authors
+     Dossy Shiobara dossy@panoptic.com
+     Vlad Seryakov vlad@crystalballinc.com

@@ -1,0 +1,18 @@
+2008-08-27  Vlad Seryakov <seryakov@users.sf.net>
+
+	* imported into Naviserver repository and updated with new API
+
+2005-03-06  tag nssqlite3_v0_r9
+
+2005-03-06  Dossy Shiobara <dossy@panoptic.com>
+
+	* ChangeLog (1.1.1.1), Makefile (1.1.1.1), README (1.1.1.1),
+	  nssqlite3.c (1.1.1.1), nssqlite3.html (1.1.1.1) (utags:
+	  nssqlite3_v0_r9): Initial import of nssqlite3, SQLite v3 database
+	  driver.
+
+2005-03-06  Dossy Shiobara <dossy@panoptic.com>
+
+	* ChangeLog (1.1), Makefile (1.1), README (1.1), nssqlite3.c (1.1),
+	  nssqlite3.html (1.1): Initial revision
+
