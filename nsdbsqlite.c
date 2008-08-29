@@ -126,8 +126,6 @@ Ns_DbDriverInit(char *driver, char *path)
         Ns_Log(Error, "nsdbsqlite: could not register the '%s' driver.", driver);
         return NS_ERROR;
     }
-    Ns_Log(Notice, "nsdbsqlite: Loaded %s, version %s built on %s at %s.",
-            driver, DRIVER_VERSION, __DATE__, __TIME__);
     return NS_OK;
 }
 
@@ -146,7 +144,7 @@ static int DbServerInit(char *hServer, char *hModule, char *hDriver)
 static const char *
 DbName(void)
 {
-    return "nsdbsqlite";
+    return "sqlite";
 }
 
 static const char *
@@ -161,9 +159,9 @@ DbOpen(Ns_DbHandle *handle)
     sqlite3         *db = NULL;
 
     sqlite3_open(handle->datasource, &db);
+
     if (sqlite3_errcode(db) != SQLITE_OK) {
-        Ns_Log(Error, "nsdbsqlite: couldn't open '%s': %s",
-                handle->datasource, sqlite3_errmsg(db));
+        Ns_Log(Error, "nsdbsqlite: couldn't open '%s': %s", handle->datasource, sqlite3_errmsg(db));
         Ns_DbSetException(handle, "NSDB", "couldn't open database");
         return NS_ERROR;
     }
@@ -192,10 +190,6 @@ DbExec(Ns_DbHandle *handle, char *sql)
     Context         *contextPtr = NULL;
     int             status, rc;
     char            *err = NULL;
-
-    if (handle->verbose) {
-        Ns_Log(Notice, "nsdbsqlite: DbExec(%s), SQL = '%s'", handle->datasource, sql);
-    }
 
     status = NS_OK;
 
@@ -323,10 +317,9 @@ DbGetRow(Ns_DbHandle *handle, Ns_Set *row)
 }
 
 static int
-DbGetRowCount(Ns_DbHandle *handle, Ns_Set *row)
+DbGetRowCount(Ns_DbHandle *handle)
 {
     Context         *contextPtr = (Context *) handle->statement;
-    long            col;
 
     if (handle->statement == NULL || !handle->fetchingRows) {
         Ns_DbSetException(handle, "NSDB", "no rows waiting to fetch");
@@ -427,8 +420,8 @@ DbCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * CONST objv[])
         Tcl_WrongNumArgs(interp, 1, objv, "option handle ?args?");
         return TCL_ERROR;
     }
-    if (Tcl_GetIndexFromObj(interp, objv[1], opts, "option", 1,
-                (int *) &opt) != TCL_OK) {
+
+    if (Tcl_GetIndexFromObj(interp, objv[1], opts, "option", 1, (int *) &opt) != TCL_OK) {
         return TCL_ERROR;
     }
 
