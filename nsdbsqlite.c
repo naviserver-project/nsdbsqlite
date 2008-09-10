@@ -242,7 +242,7 @@ DbExecCallback(void *arg, int ncolumns, char **row, char **columns)
         contextPtr->ncolumns = ncolumns;
         contextPtr->columns = ns_calloc((unsigned) ncolumns, sizeof(char *));
         for (col = 0; col < ncolumns; col++) {
-            contextPtr->columns[col] = ns_strdup(columns[col]);
+            contextPtr->columns[col] = ns_strcopy(columns[col]);
         }
     }
 
@@ -258,7 +258,7 @@ DbExecCallback(void *arg, int ncolumns, char **row, char **columns)
 
     contextPtr->rows[contextPtr->nrows] = ns_calloc((unsigned) ncolumns, sizeof(char *));
     for (col = 0; col < ncolumns; col++) {
-        contextPtr->rows[contextPtr->nrows][col] = ns_strdup(row[col]);
+        contextPtr->rows[contextPtr->nrows][col] = ns_strcopy(row[col]);
     }
     
     ++contextPtr->nrows;
