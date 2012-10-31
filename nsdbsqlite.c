@@ -168,6 +168,7 @@ DbOpen(Ns_DbHandle *handle)
 
     handle->connection = (void *) db;
     handle->connected = NS_TRUE;
+    handle->statement = NULL;
 
     return NS_OK;
 }
