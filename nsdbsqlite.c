@@ -82,19 +82,19 @@ static int DbExecCallback(void *arg, int ncolumns, char **row, char **columns);
 static Tcl_ObjCmdProc DbCmd;
 
 static Ns_DbProc dbProcs[] = {
-    { DbFn_ServerInit,   DbServerInit },
-    { DbFn_Name,         DbName },
-    { DbFn_DbType,       DbType },
-    { DbFn_OpenDb,       DbOpen },
-    { DbFn_CloseDb,      DbClose },
-    { DbFn_GetRow,       DbGetRow },
-    { DbFn_GetRowCount,  DbGetRowCount },
-    { DbFn_Flush,        DbFlush },
-    { DbFn_Cancel,       DbCancel },
-    { DbFn_Exec,         DbExec },
-    { DbFn_BindRow,      DbBindRow },
-    { DbFn_SpStart,      DbSpStart },
-    { DbFn_SpExec,       DbSpExec },
+    { DbFn_ServerInit,   (Ns_Callback *)DbServerInit },
+    { DbFn_Name,         (Ns_Callback *)DbName },
+    { DbFn_DbType,       (Ns_Callback *)DbType },
+    { DbFn_OpenDb,       (Ns_Callback *)DbOpen },
+    { DbFn_CloseDb,      (Ns_Callback *)DbClose },
+    { DbFn_GetRow,       (Ns_Callback *)DbGetRow },
+    { DbFn_GetRowCount,  (Ns_Callback *)DbGetRowCount },
+    { DbFn_Flush,        (Ns_Callback *)DbFlush },
+    { DbFn_Cancel,       (Ns_Callback *)DbCancel },
+    { DbFn_Exec,         (Ns_Callback *)DbExec },
+    { DbFn_BindRow,      (Ns_Callback *)DbBindRow },
+    { DbFn_SpStart,      (Ns_Callback *)DbSpStart },
+    { DbFn_SpExec,       (Ns_Callback *)DbSpExec },
     { 0, NULL }
 };
 
