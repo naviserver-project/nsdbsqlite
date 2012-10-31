@@ -38,7 +38,7 @@ static const char *RCSID = "@(#) $Header$, compiled: " __DATE__ " " __TIME__;
 
 #include "ns.h"
 #include "nsdb.h"
-#include <sqlite3.h>
+#include "sqlite3.h"
 
 #define DRIVER_VERSION "0.9"
 

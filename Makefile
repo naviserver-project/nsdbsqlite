@@ -36,6 +36,7 @@ endif
 MODNAME    = nsdbsqlite
 MOD        = nsdbsqlite.so
 MODOBJS    = nsdbsqlite.o
-MODLIBS    += -lnsdb -lsqlite3
+MODLIBS    += -lnsdb
+UNIXOBJS   = sqlite3.o
 
 include  $(NAVISERVER)/include/Makefile.module
