@@ -50,12 +50,12 @@ static const char *RCSID = "@(#) $Header$, compiled: " __DATE__ " " __TIME__;
 NS_EXPORT int   Ns_ModuleVersion = 1;
 
 typedef struct {
-    long            ncolumns;
+    unsigned long   ncolumns;
     char            **columns;
-    long            nrows;
+    unsigned long   nrows;
     char            ***rows;
-    long            maxrows;
-    long            row;
+    unsigned long  maxrows;
+    unsigned long  row;
 } Context;
 
 
@@ -77,7 +77,7 @@ static int DbSpExec(Ns_DbHandle *handle);
 static int DbSpStart(Ns_DbHandle *handle, char *procname);
 static const char *DbType(Ns_DbHandle *handle);
 static int DbInterpInit(Tcl_Interp * interp, void *ignored);
-static int DbExecCallback(void *arg, int ncolumns, char **row, char **columns);
+static int DbCollectRows(Ns_DbHandle *handlePtr, sqlite3_stmt *stmt);
 
 static Tcl_ObjCmdProc DbCmd;
 
@@ -190,7 +190,7 @@ DbExec(Ns_DbHandle *handle, char *sql)
     sqlite3         *db = (sqlite3 *) handle->connection;
     Context         *contextPtr = NULL;
     int             status, rc;
-    char            *err = NULL;
+    sqlite3_stmt    *stmt;
 
     status = NS_OK;
 
@@ -203,13 +203,26 @@ DbExec(Ns_DbHandle *handle, char *sql)
     contextPtr->row = 0;
     handle->statement = (void *) contextPtr;
 
-    rc = sqlite3_exec(db, sql, DbExecCallback, (void *) handle, &err);
-    if (err != NULL) {
-        Ns_Log(Error, "nsdbsqlite: error executing SQL: %s", err);
-        Ns_DbSetException(handle, "NSDB", "error executing SQL");
-        sqlite3_free(err);
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc !=  SQLITE_OK) {
+        Ns_Log(Error, "nsdbsqlite: error parsing SQL: %s", sqlite3_errmsg(db));
+        Ns_DbSetException(handle, "NSDB", "error parsing SQL");
         status = NS_ERROR;
-    } else
+    }
+
+    if ((contextPtr->ncolumns=sqlite3_column_count(stmt)) > 0) {
+    	int col;
+	contextPtr->columns = ns_calloc(contextPtr->ncolumns, sizeof(char *));
+	for (col = 0; col < contextPtr->ncolumns; col++) {
+	    contextPtr->columns[col] = ns_strcopy(sqlite3_column_name(stmt,col));
+	}
+    }
+
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+    	DbCollectRows(handle, stmt);
+    }
+
+    rc = sqlite3_finalize(stmt);
     if (rc != SQLITE_OK) {
         Ns_Log(Error, "nsdbsqlite: error executing SQL: %s", sqlite3_errmsg(db));
         Ns_DbSetException(handle, "NSDB", "error executing SQL");
@@ -221,7 +234,7 @@ DbExec(Ns_DbHandle *handle, char *sql)
         return NS_ERROR;
     }
 
-    if (contextPtr->nrows == 0) { 
+    if (contextPtr->ncolumns == 0) { 
         handle->fetchingRows = 0;
         status = NS_DML;
     } else {
@@ -233,33 +246,24 @@ DbExec(Ns_DbHandle *handle, char *sql)
 }
 
 static int
-DbExecCallback(void *arg, int ncolumns, char **row, char **columns)
+DbCollectRows(Ns_DbHandle *handlePtr, sqlite3_stmt *stmt)
 {
-    Ns_DbHandle     *handlePtr = (Ns_DbHandle *) arg;
     Context         *contextPtr = (Context *) handlePtr->statement;
     long            col;
-
-    if (contextPtr->ncolumns == 0) {
-        contextPtr->ncolumns = ncolumns;
-        contextPtr->columns = ns_calloc((unsigned) ncolumns, sizeof(char *));
-        for (col = 0; col < ncolumns; col++) {
-            contextPtr->columns[col] = ns_strcopy(columns[col]);
-        }
-    }
 
     if (contextPtr->nrows == contextPtr->maxrows) {
         if (contextPtr->maxrows == 0) {
             contextPtr->maxrows = 50;
-            contextPtr->rows = ns_calloc((unsigned) contextPtr->maxrows, sizeof(char **));
+            contextPtr->rows = ns_calloc(contextPtr->maxrows, sizeof(char **));
         } else {
             contextPtr->maxrows *= 2;
             contextPtr->rows = ns_realloc(contextPtr->rows, contextPtr->maxrows * sizeof(char **));
         }
     }
 
-    contextPtr->rows[contextPtr->nrows] = ns_calloc((unsigned) ncolumns, sizeof(char *));
-    for (col = 0; col < ncolumns; col++) {
-        contextPtr->rows[contextPtr->nrows][col] = ns_strcopy(row[col]);
+    contextPtr->rows[contextPtr->nrows] = ns_calloc(contextPtr->ncolumns, sizeof(char *));
+    for (col = 0; col < contextPtr->ncolumns; col++) {
+        contextPtr->rows[contextPtr->nrows][col] = ns_strcopy((const char *)sqlite3_column_text(stmt,col));
     }
     
     ++contextPtr->nrows;
