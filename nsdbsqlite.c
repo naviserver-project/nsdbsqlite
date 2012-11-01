@@ -51,11 +51,9 @@ NS_EXPORT int   Ns_ModuleVersion = 1;
 
 typedef struct {
     unsigned long   ncolumns;
-    char            **columns;
     unsigned long   nrows;
-    char            ***rows;
-    unsigned long  maxrows;
     unsigned long  row;
+    sqlite3_stmt   *stmt;
 } Context;
 
 
@@ -77,7 +75,6 @@ static int DbSpExec(Ns_DbHandle *handle);
 static int DbSpStart(Ns_DbHandle *handle, char *procname);
 static const char *DbType(Ns_DbHandle *handle);
 static int DbInterpInit(Tcl_Interp * interp, void *ignored);
-static int DbCollectRows(Ns_DbHandle *handlePtr, sqlite3_stmt *stmt);
 
 static Tcl_ObjCmdProc DbCmd;
 
@@ -190,44 +187,23 @@ DbExec(Ns_DbHandle *handle, char *sql)
     sqlite3         *db = (sqlite3 *) handle->connection;
     Context         *contextPtr = NULL;
     int             status, rc;
-    sqlite3_stmt    *stmt;
 
     status = NS_OK;
 
     contextPtr = ns_calloc(1, sizeof(Context));
     contextPtr->ncolumns = 0;
-    contextPtr->columns = NULL;
     contextPtr->nrows = 0;
-    contextPtr->rows = NULL;
-    contextPtr->maxrows = 0;
     contextPtr->row = 0;
     handle->statement = (void *) contextPtr;
 
-    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    rc = sqlite3_prepare_v2(db, sql, -1, &contextPtr->stmt, NULL);
     if (rc !=  SQLITE_OK) {
         Ns_Log(Error, "nsdbsqlite: error parsing SQL: %s", sqlite3_errmsg(db));
         Ns_DbSetException(handle, "NSDB", "error parsing SQL");
         status = NS_ERROR;
     }
 
-    if ((contextPtr->ncolumns=sqlite3_column_count(stmt)) > 0) {
-    	int col;
-	contextPtr->columns = ns_calloc(contextPtr->ncolumns, sizeof(char *));
-	for (col = 0; col < contextPtr->ncolumns; col++) {
-	    contextPtr->columns[col] = ns_strcopy(sqlite3_column_name(stmt,col));
-	}
-    }
-
-    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
-    	DbCollectRows(handle, stmt);
-    }
-
-    rc = sqlite3_finalize(stmt);
-    if (rc != SQLITE_OK) {
-        Ns_Log(Error, "nsdbsqlite: error executing SQL: %s", sqlite3_errmsg(db));
-        Ns_DbSetException(handle, "NSDB", "error executing SQL");
-        status = NS_ERROR;
-    }
+    contextPtr->ncolumns=sqlite3_column_count(contextPtr->stmt);
 
     if (status == NS_ERROR) {
         DbCancel(handle);
@@ -245,32 +221,6 @@ DbExec(Ns_DbHandle *handle, char *sql)
     return status;
 }
 
-static int
-DbCollectRows(Ns_DbHandle *handlePtr, sqlite3_stmt *stmt)
-{
-    Context         *contextPtr = (Context *) handlePtr->statement;
-    long            col;
-
-    if (contextPtr->nrows == contextPtr->maxrows) {
-        if (contextPtr->maxrows == 0) {
-            contextPtr->maxrows = 50;
-            contextPtr->rows = ns_calloc(contextPtr->maxrows, sizeof(char **));
-        } else {
-            contextPtr->maxrows *= 2;
-            contextPtr->rows = ns_realloc(contextPtr->rows, contextPtr->maxrows * sizeof(char **));
-        }
-    }
-
-    contextPtr->rows[contextPtr->nrows] = ns_calloc(contextPtr->ncolumns, sizeof(char *));
-    for (col = 0; col < contextPtr->ncolumns; col++) {
-        contextPtr->rows[contextPtr->nrows][col] = ns_strcopy((const char *)sqlite3_column_text(stmt,col));
-    }
-    
-    ++contextPtr->nrows;
-
-    return 0;
-}
-
 static Ns_Set *
 DbBindRow(Ns_DbHandle *handle)
 {
@@ -278,13 +228,13 @@ DbBindRow(Ns_DbHandle *handle)
     Ns_Set          *row = (Ns_Set *) handle->row;
     long            col;
 
-    if (contextPtr->columns == NULL) {
+    if (contextPtr->ncolumns == 0) {
         Ns_DbSetException(handle, "NSDB", "no result data for row");
         return NULL;
     }
 
     for (col = 0; col < contextPtr->ncolumns; col++) {
-        Ns_SetPut(row, contextPtr->columns[col], NULL);
+        Ns_SetPut(row, sqlite3_column_name(contextPtr->stmt, col), NULL);
     }
 
     return row;
@@ -296,6 +246,7 @@ DbGetRow(Ns_DbHandle *handle, Ns_Set *row)
 {
     Context         *contextPtr = (Context *) handle->statement;
     long            col;
+    int             status;
 
     if (handle->statement == NULL || !handle->fetchingRows) {
         Ns_DbSetException(handle, "NSDB", "no rows waiting to fetch");
@@ -307,16 +258,14 @@ DbGetRow(Ns_DbHandle *handle, Ns_Set *row)
         return NS_ERROR;
     }
 
-    if (contextPtr->row >= contextPtr->nrows) {
+    if ((status = sqlite3_step(contextPtr->stmt)) == SQLITE_DONE) {
         DbCancel(handle);
         return NS_END_DATA;
     }
 
     for (col = 0; col < contextPtr->ncolumns; col++) {
-        Ns_SetPutValue(row, col, contextPtr->rows[contextPtr->row][col]);
+        Ns_SetPutValue(row, col, (const char *)sqlite3_column_text(contextPtr->stmt, col));
     }
-
-    ++contextPtr->row;
 
     return NS_OK;
 }
@@ -343,28 +292,13 @@ static int
 DbCancel(Ns_DbHandle *handle)
 {
     Context         *contextPtr = (Context *) handle->statement;
-    int             col, row;
 
     if (handle->statement == NULL) {
         /* Already cancelled. */
         return NS_OK;
     }
 
-    if (contextPtr->columns != NULL) {
-        for (col = 0; col < contextPtr->ncolumns; col++) {
-            ns_free(contextPtr->columns[col]);
-        }
-        ns_free(contextPtr->columns);
-    }
-    if (contextPtr->rows != NULL) {
-        for (row = 0; row < contextPtr->nrows; row++) {
-            for (col = 0; col < contextPtr->ncolumns; col++) {
-                ns_free(contextPtr->rows[row][col]);
-            }
-            ns_free(contextPtr->rows[row]);
-        }
-        ns_free(contextPtr->rows);
-    }
+    sqlite3_finalize(contextPtr->stmt);
     ns_free(contextPtr);
     handle->statement = NULL;
     handle->fetchingRows = 0;
@@ -449,7 +383,7 @@ DbCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * CONST objv[])
                     "\" has no current statement", NULL);
             return TCL_ERROR;
         }
-        Tcl_SetObjResult(interp, Tcl_NewLongObj(contextPtr->nrows));
+        Tcl_SetObjResult(interp, Tcl_NewLongObj(sqlite3_changes(handle->connection)));
         break;
 
     case IVersionIdx:
