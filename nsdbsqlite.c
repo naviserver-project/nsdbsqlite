@@ -34,8 +34,6 @@
  *	This file implements the SQLite 3 database driver.
  */
 
-static const char *RCSID = "@(#) $Header$, compiled: " __DATE__ " " __TIME__;
-
 #include "ns.h"
 #include "nsdb.h"
 #include "sqlite3.h"
@@ -74,8 +72,8 @@ static int DbServerInit(char *server, char *module, char *driver);
 static int DbSpExec(Ns_DbHandle *handle);
 static int DbSpStart(Ns_DbHandle *handle, char *procname);
 static const char *DbType(Ns_DbHandle *handle);
-static int DbInterpInit(Tcl_Interp * interp, void *ignored);
 
+static Ns_TclTraceProc DbInterpInit;
 static Tcl_ObjCmdProc DbCmd;
 
 static Ns_DbProc dbProcs[] = {
@@ -126,7 +124,7 @@ Ns_DbDriverInit(char *driver, char *path)
     return NS_OK;
 }
 
-static int DbInterpInit(Tcl_Interp * interp, void *ignored)
+static int DbInterpInit(Tcl_Interp * interp, const void *ignored)
 {
     Tcl_CreateObjCommand(interp, "ns_sqlite", DbCmd, NULL, NULL);
     return NS_OK;
