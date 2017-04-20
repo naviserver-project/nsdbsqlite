@@ -46,6 +46,7 @@
  */
 
 NS_EXPORT int   Ns_ModuleVersion = 1;
+NS_EXPORT NsDb_DriverInitProc Ns_DbDriverInit;
 
 typedef struct {
     unsigned long   ncolumns;
@@ -53,7 +54,6 @@ typedef struct {
     unsigned long  row;
     sqlite3_stmt   *stmt;
 } Context;
-
 
 /*
  * Local functions defined in this file.
@@ -111,7 +111,7 @@ static Ns_DbProc dbProcs[] = {
  */
 
 NS_EXPORT int
-Ns_DbDriverInit(char *driver, char *path)
+Ns_DbDriverInit(const char *driver, const char *path)
 {
     if (driver == NULL) {
         Ns_Log(Bug, "nsdbsqlite: Ns_DbDriverInit() called with NULL driver name.");
