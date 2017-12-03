@@ -209,10 +209,10 @@ DbExec(Ns_DbHandle *handle, char *sql)
     }
 
     if (contextPtr->ncolumns == 0) { 
-        handle->fetchingRows = 0;
+        handle->fetchingRows = NS_FALSE;
         status = NS_DML;
     } else {
-        handle->fetchingRows = 1;
+        handle->fetchingRows = NS_TRUE;
         status = NS_ROWS;
     }
 
