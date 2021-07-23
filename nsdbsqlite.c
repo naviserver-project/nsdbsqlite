@@ -67,8 +67,8 @@ static int DbFlush(Ns_DbHandle *handle);
 static int DbGetRow(Ns_DbHandle *handle, Ns_Set *row);
 static int DbGetRowCount(Ns_DbHandle *handle);
 static const char *DbName(void);
-static int DbOpen(Ns_DbHandle *handle);
-static int DbServerInit(char *server, char *module, char *driver);
+static Ns_ReturnCode DbOpen(Ns_DbHandle *handle);
+static Ns_ReturnCode DbServerInit(char *server, char *module, char *driver);
 static int DbSpExec(Ns_DbHandle *handle);
 static int DbSpStart(Ns_DbHandle *handle, char *procname);
 static const char *DbType(Ns_DbHandle *handle);
@@ -110,7 +110,7 @@ static Ns_DbProc dbProcs[] = {
  *----------------------------------------------------------------------
  */
 
-NS_EXPORT int
+NS_EXPORT Ns_ReturnCode
 Ns_DbDriverInit(const char *driver, const char *path)
 {
     if (driver == NULL) {
@@ -124,13 +124,13 @@ Ns_DbDriverInit(const char *driver, const char *path)
     return NS_OK;
 }
 
-static int DbInterpInit(Tcl_Interp * interp, const void *ignored)
+static Ns_ReturnCode DbInterpInit(Tcl_Interp * interp, const void *ignored)
 {
     Tcl_CreateObjCommand(interp, "ns_sqlite", DbCmd, NULL, NULL);
     return NS_OK;
 }
 
-static int DbServerInit(char *hServer, char *hModule, char *hDriver)
+static Ns_ReturnCode DbServerInit(char *hServer, char *hModule, char *hDriver)
 {
     Ns_TclRegisterTrace(hServer, DbInterpInit, NULL, NS_TCL_TRACE_CREATE);
     return NS_OK;
@@ -148,7 +148,7 @@ DbType(Ns_DbHandle *handle)
     return "sqlite";
 }
 
-static int
+static Ns_ReturnCode
 DbOpen(Ns_DbHandle *handle)
 {
     sqlite3         *db = NULL;
