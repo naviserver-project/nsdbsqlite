@@ -1,0 +1,123 @@
+commit 55dc78fe2009a291077c9d25e821c197cd25062e
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2021-07-23
+
+    modernize code
+
+M	ChangeLog
+M	nsdbsqlite.c
+
+commit 7ca602269576b4547ded6b75f5e23efbae8753e0
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2017-12-03
+
+    use consistently boolean for "fetchingRows"
+
+M	nsdbsqlite.c
+
+commit e8ad06efbc41ad71b33df43b74087920a9fa27a6
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2017-04-20
+
+    - Use NsDb_DriverInitProc as prototype (requires actual version of NaviServer)
+
+M	nsdbsqlite.c
+
+commit 488546150565e8b7fc589509fd52bf64c45779e2
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2015-02-21
+
+    - adjust to new prototypes
+    - use documented MODOBJS instead of older-style OBJS in Makefiles
+
+M	Makefile
+M	nsdbsqlite.c
+
+commit d00bdefb01d2d6c77610121358f90617e27d1189
+Author: ext:(%20%22Jeff%20Rogers%22) <dvrsn@diphi.com>
+Date:   2012-11-01
+
+    change from row collection to row retrieval
+    
+    Rather than collecting all the rows up front at the time of the
+    select, retrieve them one at a time inside GetRow.  This is a
+    much more natural approach anyway.
+
+M	nsdbsqlite.c
+
+commit 068650564cc797b00c407bd36437d3cbdeab0f51
+Author: ext:(%20%22Jeff%20Rogers%22) <dvrsn@diphi.com>
+Date:   2012-10-31
+
+    change from exec to explicit prepare/step
+    
+    sqlite3_exec is a convenience routine.  It simplifies some things while
+    hiding things best exposed.  In this case, it seems better to separate
+    the allocation of columns from the opaque callback.  Original motivation
+    was to fix the bug whereby a select returning 0 rows was assumed to be dml.
+
+M	nsdbsqlite.c
+
+commit 690c62a6651161edfd1bd68727793ec5c27783d4
+Author: ext:(%20%22Jeff%20Rogers%22) <dvrsn@diphi.com>
+Date:   2012-10-31
+
+    Add in casts to Ns_Callback * to avoid compiler warnings
+
+M	nsdbsqlite.c
+
+commit 22b84c76689741d379f1dc3fb752a8ec4fc8f12f
+Author: ext:(%20%22Jeff%20Rogers%22) <dvrsn@diphi.com>
+Date:   2012-10-31
+
+    include sqlite 3.7.15 amalgamation
+    
+    Include sqlite3.c and sqlite3.h directly in the repository, rather
+    than relying on them being already installed on a system.  This follows
+    advice from the sqlite community, in order to avoid C api changes from
+    installing a new binary breaking an existing binary.
+
+M	Makefile
+M	nsdbsqlite.c
+A	sqlite3.c
+A	sqlite3.h
+
+commit b50519bb6e592ab58fd9bd49bc3f913385657511
+Author: ext:(%20%22Jeff%20Rogers%22) <dvrsn@diphi.com>
+Date:   2012-10-31
+
+    initialise statement to NULL in DbOpen
+    
+    if the DbHandle was not initialized to all zeroes (which is not guaranteed),
+    then cancelling before any query is run (i.e., just allocating a handle)
+    will segfault
+
+M	nsdbsqlite.c
+
+commit 22a77ca5097679e88271ec2560a7485fc9837c9a
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2008-09-10
+
+    Replace strdup with strcopy because of NULL columns
+
+M	nsdbsqlite.c
+
+commit c557e3a8e08d69242f0c958c29d16eaa061cab1d
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2008-08-29
+
+    Updated with new db driver, minor syntax fixes
+
+M	nsdbsqlite.c
+
+commit 556628eb5012108f54c05e42f823ba4c7c234c39
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2008-08-28
+
+    Initial revision
+
+A	ChangeLog
+A	LICENSE
+A	Makefile
+A	README
+A	nsdbsqlite.c
