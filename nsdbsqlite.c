@@ -210,7 +210,12 @@ DbExec(Ns_DbHandle *handle, char *sql)
 
     if (contextPtr->ncolumns == 0) { 
         handle->fetchingRows = NS_FALSE;
-        status = NS_DML;
+        /* for DML queries need to run sqlite3_step to execute  */
+        if (sqlite3_step(contextPtr->stmt) != SQLITE_DONE) {
+	    status = NS_ERROR;
+        } else {
+            status = NS_DML;
+        }
     } else {
         handle->fetchingRows = NS_TRUE;
         status = NS_ROWS;
