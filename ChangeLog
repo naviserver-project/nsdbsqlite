@@ -4,7 +4,6 @@ Date:   2021-07-23
 
     modernize code
 
-M	ChangeLog
 M	nsdbsqlite.c
 
 commit 7ca602269576b4547ded6b75f5e23efbae8753e0
@@ -116,7 +115,6 @@ Date:   2008-08-28
 
     Initial revision
 
-A	ChangeLog
 A	LICENSE
 A	Makefile
 A	README

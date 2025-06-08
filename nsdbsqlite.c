@@ -74,22 +74,22 @@ static int DbSpStart(Ns_DbHandle *handle, char *procname);
 static const char *DbType(Ns_DbHandle *handle);
 
 static Ns_TclTraceProc DbInterpInit;
-static Tcl_ObjCmdProc DbCmd;
+static TCL_OBJCMDPROC_T DbObjCmd;
 
 static Ns_DbProc dbProcs[] = {
-    { DbFn_ServerInit,   (Ns_Callback *)DbServerInit },
-    { DbFn_Name,         (Ns_Callback *)DbName },
-    { DbFn_DbType,       (Ns_Callback *)DbType },
-    { DbFn_OpenDb,       (Ns_Callback *)DbOpen },
-    { DbFn_CloseDb,      (Ns_Callback *)DbClose },
-    { DbFn_GetRow,       (Ns_Callback *)DbGetRow },
-    { DbFn_GetRowCount,  (Ns_Callback *)DbGetRowCount },
-    { DbFn_Flush,        (Ns_Callback *)DbFlush },
-    { DbFn_Cancel,       (Ns_Callback *)DbCancel },
-    { DbFn_Exec,         (Ns_Callback *)DbExec },
-    { DbFn_BindRow,      (Ns_Callback *)DbBindRow },
-    { DbFn_SpStart,      (Ns_Callback *)DbSpStart },
-    { DbFn_SpExec,       (Ns_Callback *)DbSpExec },
+    { DbFn_ServerInit,   (ns_funcptr_t)DbServerInit },
+    { DbFn_Name,         (ns_funcptr_t)DbName },
+    { DbFn_DbType,       (ns_funcptr_t)DbType },
+    { DbFn_OpenDb,       (ns_funcptr_t)DbOpen },
+    { DbFn_CloseDb,      (ns_funcptr_t)DbClose },
+    { DbFn_GetRow,       (ns_funcptr_t)DbGetRow },
+    { DbFn_GetRowCount,  (ns_funcptr_t)DbGetRowCount },
+    { DbFn_Flush,        (ns_funcptr_t)DbFlush },
+    { DbFn_Cancel,       (ns_funcptr_t)DbCancel },
+    { DbFn_Exec,         (ns_funcptr_t)DbExec },
+    { DbFn_BindRow,      (ns_funcptr_t)DbBindRow },
+    { DbFn_SpStart,      (ns_funcptr_t)DbSpStart },
+    { DbFn_SpExec,       (ns_funcptr_t)DbSpExec },
     { 0, NULL }
 };
 
@@ -111,7 +111,7 @@ static Ns_DbProc dbProcs[] = {
  */
 
 NS_EXPORT Ns_ReturnCode
-Ns_DbDriverInit(const char *driver, const char *path)
+Ns_DbDriverInit(const char *driver, const char *UNUSED(configPath))
 {
     if (driver == NULL) {
         Ns_Log(Bug, "nsdbsqlite: Ns_DbDriverInit() called with NULL driver name.");
@@ -124,15 +124,15 @@ Ns_DbDriverInit(const char *driver, const char *path)
     return NS_OK;
 }
 
-static Ns_ReturnCode DbInterpInit(Tcl_Interp * interp, const void *ignored)
+static Ns_ReturnCode DbInterpInit(Tcl_Interp * interp, const void *UNUSED(arg))
 {
-    Tcl_CreateObjCommand(interp, "ns_sqlite", DbCmd, NULL, NULL);
+    TCL_CREATEOBJCOMMAND(interp, "ns_sqlite", DbObjCmd, NULL, NULL);
     return NS_OK;
 }
 
-static Ns_ReturnCode DbServerInit(char *hServer, char *hModule, char *hDriver)
+static Ns_ReturnCode DbServerInit(char *server, char *UNUSED(module), char *UNUSED(driver))
 {
-    Ns_TclRegisterTrace(hServer, DbInterpInit, NULL, NS_TCL_TRACE_CREATE);
+    Ns_TclRegisterTrace(server, DbInterpInit, NULL, NS_TCL_TRACE_CREATE);
     return NS_OK;
 }
 
@@ -143,7 +143,7 @@ DbName(void)
 }
 
 static const char *
-DbType(Ns_DbHandle *handle)
+DbType(Ns_DbHandle *UNUSED(handle))
 {
     return "sqlite";
 }
@@ -201,7 +201,7 @@ DbExec(Ns_DbHandle *handle, char *sql)
         status = NS_ERROR;
     }
 
-    contextPtr->ncolumns=sqlite3_column_count(contextPtr->stmt);
+    contextPtr->ncolumns = (unsigned long)sqlite3_column_count(contextPtr->stmt);
 
     if (status == NS_ERROR) {
         DbCancel(handle);
@@ -229,7 +229,7 @@ DbBindRow(Ns_DbHandle *handle)
 {
     Context         *contextPtr = (Context *) handle->statement;
     Ns_Set          *row = (Ns_Set *) handle->row;
-    long            col;
+    unsigned long    col;
 
     if (contextPtr->ncolumns == 0) {
         Ns_DbSetException(handle, "NSDB", "no result data for row");
@@ -237,7 +237,7 @@ DbBindRow(Ns_DbHandle *handle)
     }
 
     for (col = 0; col < contextPtr->ncolumns; col++) {
-        Ns_SetPut(row, sqlite3_column_name(contextPtr->stmt, col), NULL);
+      Ns_SetPut(row, sqlite3_column_name(contextPtr->stmt, (int)col), NULL);
     }
 
     return row;
@@ -248,7 +248,7 @@ static int
 DbGetRow(Ns_DbHandle *handle, Ns_Set *row)
 {
     Context         *contextPtr = (Context *) handle->statement;
-    long            col;
+    unsigned long   col;
     int             status;
 
     if (handle->statement == NULL || !handle->fetchingRows) {
@@ -267,7 +267,7 @@ DbGetRow(Ns_DbHandle *handle, Ns_Set *row)
     }
 
     for (col = 0; col < contextPtr->ncolumns; col++) {
-        Ns_SetPutValue(row, col, (const char *)sqlite3_column_text(contextPtr->stmt, col));
+      Ns_SetPutValue(row, col, (const char *)sqlite3_column_text(contextPtr->stmt, (int)col));
     }
 
     return NS_OK;
@@ -282,7 +282,7 @@ DbGetRowCount(Ns_DbHandle *handle)
         Ns_DbSetException(handle, "NSDB", "no rows waiting to fetch");
         return NS_ERROR;
     }
-    return contextPtr->nrows;
+    return (int)contextPtr->nrows;
 }
 
 static int
@@ -332,7 +332,7 @@ DbSpExec(Ns_DbHandle *handle)
 /*
  *----------------------------------------------------------------------
  *
- * DbCmd --
+ * DbObjCmd --
  *
  *	Implement the ns_sqlite command.
  *
@@ -347,7 +347,7 @@ DbSpExec(Ns_DbHandle *handle)
 
 
 static int
-DbCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj * CONST objv[])
+DbObjCmd(ClientData UNUSED(clientData), Tcl_Interp *interp, int objc, Tcl_Obj * CONST objv[])
 {
     Ns_DbHandle         *handle;
     Context             *contextPtr;
