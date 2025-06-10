@@ -13,6 +13,19 @@ The driver is based on **nssqlite3** from AOLserver 4.5 by
 ## Compiling and Installing
 
 To compile this driver, you must have SQLite3 installed.
+If NaviServer is installed in the default location (`/usr/local/ns`)
+
+```bash
+make && sudo make install
+```
+
+Otherwise, provide a path to the install location, like e.g.
+
+```bash
+make NAVISERVER=/opt/local/ns499/
+sudo make NAVISERVER=/opt/local/ns499/ install
+```
+
 
 ---
 
@@ -33,7 +46,7 @@ ns_section ns/db/pool/sqlite {
     ns_param datasource   /tmp/sqlite.db
     ns_param verbose      off
 }
-````
+```
 
 ---
 
