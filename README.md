@@ -88,3 +88,15 @@ ns_db releasehandle $h
 * Vlad Seryakov – [vlad@crystalballinc.com](mailto:vlad@crystalballinc.com)
 
 ```
+
+## Tests
+
+Run `make test` (or `make NAVISERVER=/path/to/ns test`). The tests start
+an isolated NaviServer instance without a network listener and use a temporary
+database. `TESTFLAGS` accepts tcltest options, for example `-verbose bpse`.
+
+## License
+
+The driver and build/test files use the Mozilla Public License 2.0; see
+LICENSE. The bundled SQLite source and header retain their upstream
+public-domain notices.

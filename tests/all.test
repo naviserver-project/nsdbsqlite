@@ -1,0 +1,36 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+package require tcltest 2.2
+namespace import ::tcltest::*
+configure {*}$argv
+set h [ns_db gethandle sqlite]
+ns_db dml $h {CREATE TABLE items (id INTEGER PRIMARY KEY)}
+test sqlite-1.1 {prepare error includes SQLite diagnostic} -body {
+    set failed [catch {ns_db dml $h {INSERT INTO missing VALUES (1)}}]
+    list $failed [string match {*no such table*} [ns_dberrormsg $h]]
+} -result {1 1}
+test sqlite-1.2 {DML constraint error includes SQLite diagnostic} -body {
+    ns_db dml $h {INSERT INTO items VALUES (1)}
+    set failed [catch {ns_db dml $h {INSERT INTO items VALUES (1)}}]
+    list $failed [string match {*UNIQUE constraint failed*} [ns_dberrormsg $h]]
+} -result {1 1}
+test sqlite-1.3 {step error is not a successful row} -body {
+    set row [ns_db select $h {SELECT abs(-9223372036854775808)}]
+    set failed [catch {ns_db getrow $h $row}]
+    list $failed [string match {*integer overflow*} [ns_dberrormsg $h]]
+} -result {1 1}
+test sqlite-1.4 {connection works after failed fetch} -body {
+    set row [ns_db 1row $h {SELECT count(*) AS n FROM items}]
+    ns_set get $row n
+} -result 1
+test sqlite-1.5 {normal result completion} -body {
+    set row [ns_db select $h {SELECT id FROM items}]
+    list [ns_db getrow $h $row] [ns_set get $row id] [ns_db getrow $h $row]
+} -result {1 1 0}
+ns_db releasehandle $h
+set failed $::tcltest::numTests(Failed)
+cleanupTests
+if {$failed} {ns_shutdown -restart} else {ns_shutdown}
+vwait forever

@@ -1,0 +1,28 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+set root [file dirname [file dirname [file normalize [ns_info config]]]]
+set naviserver [file dirname [file dirname [info nameofexecutable]]]
+set home [file join /tmp nsdbsqlite-tests-[pid]]
+file mkdir $home
+ns_section ns/parameters {
+    ns_param home $home
+    ns_param logdir $home
+    ns_param pidfile $home/nsd.pid
+    ns_param tcllibrary $naviserver/tcl
+}
+ns_section ns/servers {ns_param test test}
+ns_section ns/server/test/tcl {ns_param initfile $naviserver/bin/init.tcl}
+ns_section ns/db/drivers {ns_param sqlite $root/nsdbsqlite.so}
+ns_section ns/db/pools {ns_param sqlite SQLite}
+ns_section ns/db/pool/sqlite {
+    ns_param driver sqlite
+    ns_param connections 1
+    ns_param datasource $home/test.db
+}
+ns_section ns/server/test/db {
+    ns_param pools sqlite
+    ns_param defaultpool sqlite
+}
+ns_section ns/server/test/modules {ns_param nsdb $naviserver/bin/nsdb.so}

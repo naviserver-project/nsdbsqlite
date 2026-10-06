@@ -1,30 +1,11 @@
 /*
- * The contents of this file are subject to the Mozilla Public License
- * Version 1.1 (the "License"); you may not use this file except in
- * compliance with the License. You may obtain a copy of the License at
- * http://mozilla.org/.
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  *
- * Software distributed under the License is distributed on an "AS IS"
- * basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
- * the License for the specific language governing rights and limitations
- * under the License.
- *
- * The Original Code is AOLserver Code and related documentation
- * distributed by AOL.
- * 
- * The Initial Developer of the Original Code is America Online,
- * Inc. Portions created by AOL are Copyright (C) 1999 America Online,
- * Inc. All Rights Reserved.
- *
- * Alternatively, the contents of this file may be used under the terms
- * of the GNU General Public License (the "GPL"), in which case the
- * provisions of GPL are applicable instead of those above.  If you wish
- * to allow use of your version of this file only under the terms of the
- * GPL and not to allow others to use your version of this file under the
- * License, indicate your decision by deleting the provisions above and
- * replace them with the notice and other provisions required by the GPL.
- * If you do not delete the provisions above, a recipient may use your
- * version of this file under either the License or the GPL.
+ * The Initial Developer of the Original Code and related documentation
+ * is America Online, Inc. Portions created by AOL are Copyright (C) 1999
+ * America Online, Inc. All Rights Reserved.
  */
 
 
@@ -60,6 +41,7 @@ typedef struct {
  */
 
 static Ns_Set *DbBindRow(Ns_DbHandle *handle);
+static void DbError(Ns_DbHandle *handle, const char *operation);
 static int DbCancel(Ns_DbHandle *handle);
 static int DbClose(Ns_DbHandle *handle);
 static int DbExec(Ns_DbHandle *handle, char *sql);
@@ -148,16 +130,31 @@ DbType(Ns_DbHandle *UNUSED(handle))
     return "sqlite";
 }
 
+/* Preserve the SQLite diagnostic before finalizing a statement or connection. */
+static void
+DbError(Ns_DbHandle *handle, const char *operation)
+{
+    const char *message = sqlite3_errmsg((sqlite3 *)handle->connection);
+
+    Ns_Log(Error, "nsdbsqlite: %s: %s", operation, message);
+    Ns_DbSetException(handle, "NSDB", message);
+}
+
 static Ns_ReturnCode
 DbOpen(Ns_DbHandle *handle)
 {
     sqlite3         *db = NULL;
 
-    sqlite3_open(handle->datasource, &db);
+    int rc = sqlite3_open(handle->datasource, &db);
 
-    if (sqlite3_errcode(db) != SQLITE_OK) {
-        Ns_Log(Error, "nsdbsqlite: couldn't open '%s': %s", handle->datasource, sqlite3_errmsg(db));
-        Ns_DbSetException(handle, "NSDB", "couldn't open database");
+    if (rc != SQLITE_OK) {
+        const char *message = db != NULL ? sqlite3_errmsg(db) : sqlite3_errstr(rc);
+
+        Ns_Log(Error, "nsdbsqlite: couldn't open '%s': %s", handle->datasource, message);
+        Ns_DbSetException(handle, "NSDB", message);
+        if (db != NULL) {
+            sqlite3_close(db);
+        }
         return NS_ERROR;
     }
 
@@ -173,7 +170,12 @@ DbClose(Ns_DbHandle *handle)
 {
     sqlite3         *db = (sqlite3 *) handle->connection;
 
-    sqlite3_close(db);
+    DbCancel(handle);
+    if (sqlite3_close(db) != SQLITE_OK) {
+        DbError(handle, "closing database");
+        return NS_ERROR;
+    }
+    handle->connection = NULL;
     handle->connected = NS_FALSE;
 
     return NS_OK;
@@ -188,6 +190,7 @@ DbExec(Ns_DbHandle *handle, char *sql)
 
     status = NS_OK;
 
+    DbCancel(handle);
     contextPtr = ns_calloc(1, sizeof(Context));
     contextPtr->ncolumns = 0;
     contextPtr->nrows = 0;
@@ -196,8 +199,7 @@ DbExec(Ns_DbHandle *handle, char *sql)
 
     rc = sqlite3_prepare_v2(db, sql, -1, &contextPtr->stmt, NULL);
     if (rc !=  SQLITE_OK) {
-        Ns_Log(Error, "nsdbsqlite: error parsing SQL: %s", sqlite3_errmsg(db));
-        Ns_DbSetException(handle, "NSDB", "error parsing SQL");
+        DbError(handle, "preparing SQL");
         status = NS_ERROR;
     }
 
@@ -212,7 +214,9 @@ DbExec(Ns_DbHandle *handle, char *sql)
         handle->fetchingRows = NS_FALSE;
         /* for DML queries need to run sqlite3_step to execute  */
         if (sqlite3_step(contextPtr->stmt) != SQLITE_DONE) {
-	    status = NS_ERROR;
+            DbError(handle, "executing SQL");
+            DbCancel(handle);
+            status = NS_ERROR;
         } else {
             status = NS_DML;
         }
@@ -264,6 +268,12 @@ DbGetRow(Ns_DbHandle *handle, Ns_Set *row)
     if ((status = sqlite3_step(contextPtr->stmt)) == SQLITE_DONE) {
         DbCancel(handle);
         return NS_END_DATA;
+    }
+
+    if (status != SQLITE_ROW) {
+        DbError(handle, "fetching row");
+        DbCancel(handle);
+        return NS_ERROR;
     }
 
     for (col = 0; col < contextPtr->ncolumns; col++) {
