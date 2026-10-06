@@ -5,16 +5,17 @@
 set root [file dirname [file dirname [file normalize [ns_info config]]]]
 set naviserver [file dirname [file dirname [info nameofexecutable]]]
 set stub [file join $naviserver bin nsdbtest.so]
-set testPools sqlite
+set testPools sqlite,relative,shared,memory,nested,temporary,normalized,uri
 if {[file exists $stub]} {append testPools ,foreign}
 set home [file join /tmp nsdbsqlite-tests-[pid]]
-file mkdir $home
+file mkdir [file join $home data sqlite nested]
 ns_section ns/parameters {
     ns_param home $home
     ns_param logdir $home
     ns_param pidfile $home/nsd.pid
     ns_param tcllibrary $naviserver/tcl
 }
+ns_section test {ns_param originalDatasource $home/test.db}
 ns_section ns/servers {ns_param test test}
 ns_section ns/server/test/tcl {ns_param initfile $naviserver/bin/init.tcl}
 ns_section ns/db/drivers {ns_param sqlite $root/nsdbsqlite.so}
@@ -38,5 +39,22 @@ if {[file exists $stub]} {
         ns_param driver nsdbtest
         ns_param connections 1
         ns_param datasource test
+    }
+}
+
+ns_section ns/db/pools {
+    ns_param relative {Relative filename test}
+    ns_param shared {Shared database test}
+    ns_param memory {Special datasource test}
+    ns_param nested {Relative nested path test}
+    ns_param temporary {Temporary SQLite database test}
+    ns_param normalized {Normalized relative path test}
+    ns_param uri {URI datasource spelling test}
+}
+foreach {pool source} {relative shared.db shared shared.db memory :memory: nested nested/site.db temporary {} normalized ./nested/../normalized.db uri file:uri-test.db?mode=memory} {
+    ns_section ns/db/pool/$pool {
+        ns_param driver sqlite
+        ns_param connections 1
+        ns_param datasource $source
     }
 }

@@ -1,4 +1,4 @@
-# SQLite Database Driver for NaviServer 4.x
+# SQLite Database Driver for NaviServer
 
 **Release:** 0.9  
 **Author:** [Vlad Seryakov](mailto:vlad@crystalballinc.com)
@@ -12,7 +12,8 @@ The driver is based on **nssqlite3** from AOLserver 4.5 by
 
 ## Compiling and Installing
 
-To compile this driver, you must have SQLite3 installed.
+The driver builds with its bundled SQLite source; a separate SQLite installation
+is not required.
 If NaviServer is installed in the default location (`/usr/local/ns`)
 
 ```bash
@@ -32,6 +33,11 @@ sudo make NAVISERVER=/opt/local/ns499/ install
 ## Configuration Snippet
 
 ```tcl
+# Use the same home value configured in ns/parameters.
+set home /usr/local/ns
+set dbdir [file join $home data sqlite]
+file mkdir $dbdir
+
 ns_section ns/db/drivers {
     ns_param sqlite       nsdbsqlite.so
 }
@@ -43,19 +49,70 @@ ns_section ns/db/pools {
 ns_section ns/db/pool/sqlite {
     ns_param driver       sqlite
     ns_param connections  1
-    ns_param datasource   /tmp/sqlite.db
+    ns_param datasource   mydatabase.db
     ns_param verbose      off
 }
 ```
+
+## Standalone database layout
+
+Use `<NaviServer home>/data/sqlite/<database>.db` for persistent databases,
+where the name identifies the logical database, independently of the application
+or connection pool. For example:
+
+```text
+/usr/local/ns/data/sqlite/
+    openacs-org.db
+    another-site.db
+    mail.db
+```
+
+SQLite has no separate cluster service. Each database file can contain many
+tables and serve multiple applications. Use table prefixes such as `smtpd_`
+when applications share a database. Several NaviServer pools or virtual servers
+can point at the same file; adding a pool does not require a new database.
+
+A relative `datasource`, such as `mail.db` or `sites/example.db`, is completed
+under `<NaviServer home>/data/sqlite/` and normalized. `ns_db datasource $h`
+reports the resolved path. An absolute path is used unchanged. `:memory:`, the
+empty string (SQLite's temporary database), and `file:` URI strings keep their
+existing SQLite behavior; this completion does not enable URI processing.
+
+For example, `ns_param datasource mail.db` uses the logical database
+`<NaviServer home>/data/sqlite/mail.db`, regardless of the pool name. The
+`datasource` parameter remains required; the driver does not invent a database
+name when it is omitted. Create the data directory, including any relative
+subdirectories, before opening a pool. Existing configurations with relative
+paths must use an absolute path to preserve their previous location.
+
+Keep related tables together when operations need a common transaction. Choose
+separate files when datasets have independent ownership, backup, or maintenance
+requirements. OpenACS's primary database requirements are unchanged; SQLite can
+provide accompanying standalone services such as nssmtpd persistence.
+
+Keep database files outside the page root. The server account needs write access
+to the containing directory and the database, since SQLite creates journal,
+WAL, and shared-memory files alongside it. The configuration example creates
+the data directory explicitly; SQLite creates the database on its first open.
+Use a persistent local volume and include these databases in the site's backup
+and recovery procedures. Back up live databases with SQLite's backup facilities
+or after a clean shutdown rather than copying a database file during writes.
+
+For a modest standalone service, start with one connection per pool. Configure
+foreign-key enforcement, lock waiting, and other connection settings consistently
+for every connection, including reopened connections. Choose journal and
+synchronous settings according to the service's durability requirements; the
+driver does not silently select WAL or change SQLite's durability defaults.
 
 ---
 
 ## Minimal Example
 
-Create a database in `/tmp/sqlite.db` and populate it with values:
+With the default home from the configuration above, create the database with
+`sqlite3 /usr/local/ns/data/sqlite/mydatabase.db` and populate it with values.
+The SQLite command-line program is needed only for this interactive example:
 
 ```sql
-.open /tmp/sqlite.db
 create table t1 (c INT);
 insert into t1(c) values (1), (2), (3);
 select * from t1;

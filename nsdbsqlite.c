@@ -66,6 +66,7 @@ typedef struct {
  * Local functions defined in this file.
  */
 
+static void DbConfigureDatasources(const char *driver);
 static Ns_Set *DbBindRow(Ns_DbHandle *handle);
 static void DbError(Ns_DbHandle *handle, const char *operation);
 static Ns_ReturnCode DbCancel(Ns_DbHandle *handle);
@@ -140,9 +141,49 @@ Ns_DbDriverInit(const char *driver, const char *UNUSED(configPath))
         Ns_Log(Error, "nsdbsqlite: could not register the '%s' driver.", driver);
         return NS_ERROR;
     }
+    DbConfigureDatasources(driver);
     Ns_Log(Notice, "nsdbsqlite: version %s loaded, based on SQLite %s (headers %s)",
            DRIVER_VERSION, sqlite3_libversion(), SQLITE_VERSION);
     return NS_OK;
+}
+
+/* nsdb loads the driver before copying datasource values into its pools. */
+static void
+DbConfigureDatasources(const char *driver)
+{
+    const Ns_Set *pools = Ns_ConfigGetSection("ns/db/pools");
+    size_t i;
+
+    for (i = 0u; pools != NULL && i < Ns_SetSize(pools); i++) {
+        const char *section = Ns_ConfigGetPath(NULL, NULL, "db", "pool",
+                                               Ns_SetKey(pools, i), NS_SENTINEL);
+        const char *poolDriver, *source;
+        Tcl_DString path, normalized;
+
+        if (section == NULL) {
+            continue;
+        }
+        poolDriver = Ns_ConfigGetValue(section, "driver");
+        if (poolDriver == NULL || !STREQ(poolDriver, driver)) {
+            continue;
+        }
+        source = Ns_ConfigGetValue(section, "datasource");
+        /* Missing datasources are rejected by nsdb. Preserve SQLite's special
+         * names, URI spelling, and explicitly supplied absolute paths.
+         */
+        if (source == NULL || *source == '\0' || STREQ(source, ":memory:")
+            || strncmp(source, "file:", 5u) == 0 || Ns_PathIsAbsolute(source)) {
+            continue;
+        }
+        Tcl_DStringInit(&path);
+        Tcl_DStringInit(&normalized);
+        Ns_MakePath(&path, Ns_InfoHomePath(), "data", "sqlite", source, NS_SENTINEL);
+        Ns_NormalizePath(&normalized, Tcl_DStringValue(&path));
+        Ns_SetIUpdate(Ns_ConfigGetSection(section), "datasource",
+                      Tcl_DStringValue(&normalized));
+        Tcl_DStringFree(&normalized);
+        Tcl_DStringFree(&path);
+    }
 }
 
 static Ns_ReturnCode DbInterpInit(Tcl_Interp * interp, const void *UNUSED(arg))

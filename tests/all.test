@@ -455,6 +455,63 @@ test sqlite-8.5 {valid command calls still return normal values} -body {
          [ns_sqlite rows_affected $h]
 } -result {1 1}
 
+test sqlite-9.1 {relative filenames resolve under home/data/sqlite} -body {
+    set db [ns_db gethandle relative]
+    try {
+        set expected [file join [ns_info home] data sqlite shared.db]
+        list [expr {[ns_db datasource $db] eq $expected}] [file exists $expected]
+    } finally {ns_db releasehandle $db}
+} -result {1 1}
+
+test sqlite-9.2 {different pools can share one logical database} -body {
+    set db [ns_db gethandle relative]
+    try {ns_db dml $db {CREATE TABLE shared_test (id INTEGER)}} finally {ns_db releasehandle $db}
+    set db [ns_db gethandle shared]
+    try {
+        ns_db dml $db {INSERT INTO shared_test VALUES (1)}
+        set row [ns_db 1row $db {SELECT count(*) AS n FROM shared_test}]
+        ns_set get $row n
+    } finally {ns_db releasehandle $db}
+} -result 1
+
+test sqlite-9.3 {relative subdirectories are resolved under the same root} -body {
+    set db [ns_db gethandle nested]
+    try {
+        expr {[ns_db datasource $db] eq [file join [ns_info home] data sqlite nested site.db]}
+    } finally {ns_db releasehandle $db}
+} -result 1
+
+test sqlite-9.4 {absolute datasource remains unchanged} -body {
+    expr {[ns_db datasource $h] eq [ns_config test originalDatasource]}
+} -result 1
+
+test sqlite-9.5 {in-memory datasource remains unchanged} -body {
+    set db [ns_db gethandle memory]
+    try {
+        ns_db dml $db {CREATE TABLE memory_test (id INTEGER)}
+        expr {[ns_db datasource $db] eq ":memory:"}
+    } finally {ns_db releasehandle $db}
+} -result 1
+
+test sqlite-9.6 {empty temporary datasource remains unchanged} -body {
+    set db [ns_db gethandle temporary]
+    try {
+        ns_db dml $db {CREATE TABLE temporary_test (id INTEGER)}
+        expr {[ns_db datasource $db] eq ""}
+    } finally {ns_db releasehandle $db}
+} -result 1
+
+test sqlite-9.7 {relative dot components are normalized} -body {
+    set db [ns_db gethandle normalized]
+    try {
+        expr {[ns_db datasource $db] eq [file join [ns_info home] data sqlite normalized.db]}
+    } finally {ns_db releasehandle $db}
+} -result 1
+
+test sqlite-9.8 {URI spelling is preserved without changing URI support} -body {
+    ns_config ns/db/pool/uri datasource
+} -result {file:uri-test.db?mode=memory}
+
 ns_db releasehandle $h
 set failed $::tcltest::numTests(Failed)
 cleanupTests
