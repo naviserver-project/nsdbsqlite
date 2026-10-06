@@ -19,6 +19,11 @@ UNIXOBJS   = sqlite3.o
 
 include  $(NAVISERVER)/include/Makefile.module
 
+# Keep the upstream SQLite amalgamation on baseline warnings. Retain all
+# other build flags, including hardening, and strict checks for our driver.
+sqlite3.o: CFLAGS_WARNING = -Wall $(CFLAGS_FORTIFY)
+sqlite3.o: CFLAGS_COMPILER =
+
 NSD ?= $(NAVISERVER)/bin/nsd
 TESTFLAGS ?=
 .PHONY: test
