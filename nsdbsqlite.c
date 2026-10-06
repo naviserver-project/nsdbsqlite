@@ -548,7 +548,7 @@ DbObjCmd(ClientData UNUSED(clientData), Tcl_Interp *interp, int objc, Tcl_Obj * 
     } opt;
 
     if (objc < 3) {
-        Tcl_WrongNumArgs(interp, 1, objv, "option handle ?args?");
+        Tcl_WrongNumArgs(interp, 1, objv, "option handle");
         return TCL_ERROR;
     }
 
@@ -560,9 +560,16 @@ DbObjCmd(ClientData UNUSED(clientData), Tcl_Interp *interp, int objc, Tcl_Obj * 
         return TCL_ERROR;
     }
 
+    assert(handle != NULL);
+    /* Validate the driver before interpreting its private connection data. */
     if (!STREQ(Ns_DbDriverName(handle), DbName())) {
         Tcl_AppendResult(interp, "handle \"", Tcl_GetString(objv[2]),
                 "\" is not of type \"", DbName(), "\"", NULL);
+        return TCL_ERROR;
+    }
+
+    /* Both subcommands take only the validated handle, with no trailing args. */
+    if (Ns_ParseObjv(NULL, NULL, interp, 3, objc, objv) != NS_OK) {
         return TCL_ERROR;
     }
 

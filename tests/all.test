@@ -406,6 +406,55 @@ test sqlite-7.9 {an unterminated trailing block comment follows SQLite syntax} -
     ns_set get $row n
 } -result 9
 
+test sqlite-8.1 {subcommands reject missing handle arguments} -body {
+    set result {}
+    foreach option {version rows_affected} {
+        lappend result [list [catch {ns_sqlite $option} message] $message]
+    }
+    set result
+} -result {{1 {wrong # args: should be "ns_sqlite option handle"}} {1 {wrong # args: should be "ns_sqlite option handle"}}}
+
+test sqlite-8.2 {Ns_ParseObjv rejects trailing arguments} -body {
+    set result {}
+    foreach option {version rows_affected} {
+        set failed [catch {ns_sqlite $option $h extra} message]
+        lappend result [list $failed [string match {wrong # args:*} $message]]
+    }
+    set result
+} -result {{1 1} {1 1}}
+
+test sqlite-8.3 {invalid handle is rejected before parsing trailing arguments} -body {
+    set result {}
+    foreach option {version rows_affected} {
+        catch {ns_sqlite $option invalid-handle} expected
+        set failed [catch {ns_sqlite $option invalid-handle extra} message]
+        lappend result [list $failed [expr {$message eq $expected}]]
+    }
+    set result
+} -result {{1 1} {1 1}}
+
+testConstraint foreignDriver [expr {"foreign" in [ns_db pools]}]
+test sqlite-8.4 {wrong driver is rejected before parsing and connection access} -constraints foreignDriver -body {
+    set foreign [ns_db gethandle foreign]
+    try {
+        set result {}
+        foreach option {version rows_affected} {
+            set failed [catch {ns_sqlite $option $foreign extra} message]
+            lappend result [list $failed [string match {*is not of type "sqlite"} $message]]
+        }
+        set result
+    } finally {
+        ns_db releasehandle $foreign
+    }
+} -result {{1 1} {1 1}}
+
+test sqlite-8.5 {valid command calls still return normal values} -body {
+    set version [ns_sqlite version $h]
+    ns_db dml $h {UPDATE tail_items SET value = 'updated'}
+    list [regexp {^[0-9]+\.[0-9]+\.[0-9]+$} $version] \
+         [ns_sqlite rows_affected $h]
+} -result {1 1}
+
 ns_db releasehandle $h
 set failed $::tcltest::numTests(Failed)
 cleanupTests

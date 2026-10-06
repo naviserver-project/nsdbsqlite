@@ -4,6 +4,9 @@
 
 set root [file dirname [file dirname [file normalize [ns_info config]]]]
 set naviserver [file dirname [file dirname [info nameofexecutable]]]
+set stub [file join $naviserver bin nsdbtest.so]
+set testPools sqlite
+if {[file exists $stub]} {append testPools ,foreign}
 set home [file join /tmp nsdbsqlite-tests-[pid]]
 file mkdir $home
 ns_section ns/parameters {
@@ -22,7 +25,18 @@ ns_section ns/db/pool/sqlite {
     ns_param datasource $home/test.db
 }
 ns_section ns/server/test/db {
-    ns_param pools sqlite
+    ns_param pools $testPools
     ns_param defaultpool sqlite
 }
 ns_section ns/server/test/modules {ns_param nsdb $naviserver/bin/nsdb.so}
+
+# Use NaviServer's stub driver to test rejection before casting connections.
+if {[file exists $stub]} {
+    ns_section ns/db/drivers {ns_param nsdbtest $stub}
+    ns_section ns/db/pools {ns_param foreign {Foreign driver test}}
+    ns_section ns/db/pool/foreign {
+        ns_param driver nsdbtest
+        ns_param connections 1
+        ns_param datasource test
+    }
+}
