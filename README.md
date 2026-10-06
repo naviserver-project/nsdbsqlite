@@ -84,7 +84,7 @@ ns_db releasehandle $h
 
 ## Tests
 
-Run `make test` (or `make NAVISERVER=/path/to/ns test`). The tests start
+Run `make test` (or `make NAVISERVER=/path/to/ns test`). The tests include direct C callback/finalization checks and start
 an isolated NaviServer instance without a network listener and use a temporary
 database. `TESTFLAGS` accepts tcltest options, for example `-verbose bpse`.
 
@@ -167,3 +167,15 @@ SQLite 3.53.4 is reported as `3053004`.
 `ns_sqlite version $h` continues to return the version string. Driver startup
 also logs the driver version, runtime SQLite version, and compile-time header
 version. Inspecting versions does not execute SQL or alter results or counts.
+
+## Statement lifecycle
+
+Binding or fetching after a result has been canceled, flushed, exhausted, or
+reset returns a driver error. Fetching requires a row set with the same number
+of fields as the result; a mismatched set is rejected without consuming a row.
+Cancel and flush are safe to repeat and clear the pending statement even if
+SQLite finalization reports an error. Existing SQL diagnostics are preserved.
+
+Statement replacement stops if finalizing the previous statement fails. Reset
+still attempts to roll back an unfinished transaction, and close still attempts
+to close the connection; both report cleanup errors to their callers.

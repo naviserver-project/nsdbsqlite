@@ -27,7 +27,7 @@ sqlite3.o: CFLAGS_COMPILER =
 NSD ?= $(NAVISERVER)/bin/nsd
 TESTFLAGS ?=
 .PHONY: test
-test: all
+test: all test-lifecycle
 	$(NSD) -c -d -t $(CURDIR)/tests/test.nscfg $(CURDIR)/tests/all.test $(TESTFLAGS)
 
 # Generate the amalgamation from a pinned release in SQLite's official Git mirror.
@@ -69,7 +69,8 @@ help:
 	    '  all             Build the driver (default; uses bundled SQLite)' \
 	    '  install         Install the driver into NAVISERVER' \
 	    '  clean           Remove build artifacts' \
-	    '  test            Build and run isolated integration tests' \
+	    '  test            Run lifecycle and isolated integration tests' \
+	    '  test-lifecycle  Run direct callback/finalization checks' \
 	    '  refresh-sqlite  Download a GitHub release and regenerate sqlite3.c/h' \
 	    '  help            Show this help' \
 	    '' \
@@ -84,3 +85,16 @@ help:
 	    '  make NAVISERVER=/opt/ns' \
 	    '  make test TESTFLAGS="-verbose bpse"' \
 	    '  make refresh-sqlite SQLITE_VERSION=$(SQLITE_VERSION)'
+
+.PHONY: test-lifecycle clean-lifecycle
+test-lifecycle: tests/lifecycle-test$(EXEEXT)
+	./tests/lifecycle-test$(EXEEXT)
+
+tests/lifecycle-test$(EXEEXT): tests/lifecycle-test.o sqlite3.o
+	$(CC) $(LDFLAGS) -o $@ tests/lifecycle-test.o sqlite3.o $(MODLIBS) $(NSLIBS)
+
+tests/lifecycle-test.o: nsdbsqlite.c sqlite3.h $(MODULE_INFO_HEADER)
+
+clean: clean-lifecycle
+clean-lifecycle:
+	$(RM) tests/lifecycle-test$(EXEEXT) tests/lifecycle-test.o

@@ -198,6 +198,59 @@ test sqlite-4.2 {version introspection leaves pending results and counts intact}
     list $before $after $value $done [ns_db rowcount $h]
 } -result {{1 0} {1 0} 20 0 2}
 
+test sqlite-5.1 {bind after reset has a clear error} -body {
+    ns_db resethandle $h
+    list [catch {ns_db bindrow $h}] [ns_dberrormsg $h]
+} -result {1 {no result data for row}}
+
+test sqlite-5.2 {bind after prepare failure does not dereference freed context} -body {
+    catch {ns_db exec $h {SELECT FROM}}
+    list [catch {ns_db bindrow $h}] [ns_dberrormsg $h]
+} -result {1 {no result data for row}}
+
+test sqlite-5.3 {bind and fetch after result completion are rejected} -body {
+    set row [ns_db select $h {SELECT 1 AS n}]
+    ns_db getrow $h $row
+    ns_db getrow $h $row
+    list [catch {ns_db bindrow $h}] [catch {ns_db getrow $h $row}] \
+         [ns_dberrormsg $h]
+} -result {1 1 {no rows waiting to fetch}}
+
+test sqlite-5.4 {cancel and flush are idempotent and prevent further fetching} -body {
+    set row [ns_db select $h {SELECT 1 AS n UNION ALL SELECT 2}]
+    ns_db getrow $h $row
+    ns_db cancel $h
+    ns_db cancel $h
+    ns_db flush $h
+    set result [list [catch {ns_db bindrow $h}] [catch {ns_db getrow $h $row}]]
+    set row [ns_db 1row $h {SELECT 3 AS n}]
+    lappend result [ns_set get $row n]
+} -result {1 1 3}
+
+test sqlite-5.5 {wrong row-set width is rejected before consuming a result} -body {
+    set row [ns_db select $h {SELECT 10 AS n, 20 AS m}]
+    set wrong [ns_set create wrong n {}]
+    try {
+        set result [list [catch {ns_db getrow $h $wrong}] [ns_dberrormsg $h]]
+        ns_db getrow $h $row
+        lappend result [ns_set get $row n] [ns_set get $row m]
+        ns_db flush $h
+        set result
+    } finally {
+        ns_set free $wrong
+    }
+} -result {1 {row set does not match result columns} 10 20}
+
+test sqlite-5.6 {step diagnostic survives finalization and connection recovers} -body {
+    set row [ns_db select $h {SELECT abs(-9223372036854775808)}]
+    catch {ns_db getrow $h $row}
+    set diagnostic [ns_dberrormsg $h]
+    ns_db flush $h
+    ns_db cancel $h
+    set row [ns_db 1row $h {SELECT 9 AS n}]
+    list [string match {*integer overflow*} $diagnostic] [ns_set get $row n]
+} -result {1 9}
+
 ns_db releasehandle $h
 set failed $::tcltest::numTests(Failed)
 cleanupTests

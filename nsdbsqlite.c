@@ -67,7 +67,7 @@ typedef struct {
 
 static Ns_Set *DbBindRow(Ns_DbHandle *handle);
 static void DbError(Ns_DbHandle *handle, const char *operation);
-static int DbCancel(Ns_DbHandle *handle);
+static Ns_ReturnCode DbCancel(Ns_DbHandle *handle);
 static int DbClose(Ns_DbHandle *handle);
 static int DbExec(Ns_DbHandle *handle, char *sql);
 static int DbFlush(Ns_DbHandle *handle);
@@ -228,7 +228,8 @@ DbClose(Ns_DbHandle *handle)
     Connection      *connectionPtr = (Connection *)handle->connection;
     sqlite3         *db = connectionPtr->db;
 
-    DbCancel(handle);
+    int status = DbCancel(handle);
+
     if (sqlite3_close(db) != SQLITE_OK) {
         DbError(handle, "closing database");
         return NS_ERROR;
@@ -237,7 +238,7 @@ DbClose(Ns_DbHandle *handle)
     handle->connection = NULL;
     handle->connected = NS_FALSE;
 
-    return NS_OK;
+    return status;
 }
 
 static int
@@ -250,7 +251,9 @@ DbExec(Ns_DbHandle *handle, char *sql)
 
     status = NS_OK;
 
-    DbCancel(handle);
+    if (DbCancel(handle) != NS_OK) {
+        return NS_ERROR;
+    }
     contextPtr = ns_calloc(1, sizeof(Context));
     contextPtr->ncolumns = 0;
     connectionPtr->nrows = 0;
@@ -301,7 +304,8 @@ DbBindRow(Ns_DbHandle *handle)
     Ns_Set          *row = (Ns_Set *) handle->row;
     unsigned long    col;
 
-    if (contextPtr->ncolumns == 0) {
+    if (contextPtr == NULL || contextPtr->stmt == NULL
+        || !handle->fetchingRows || contextPtr->ncolumns == 0) {
         Ns_DbSetException(handle, "NSDB", "no result data for row");
         return NULL;
     }
@@ -321,13 +325,18 @@ DbGetRow(Ns_DbHandle *handle, Ns_Set *row)
     unsigned long   col;
     int             status;
 
-    if (handle->statement == NULL || !handle->fetchingRows) {
+    if (contextPtr == NULL || contextPtr->stmt == NULL || !handle->fetchingRows) {
         Ns_DbSetException(handle, "NSDB", "no rows waiting to fetch");
         return NS_ERROR;
     }
 
     if (contextPtr->ncolumns == 0) {
+        Ns_DbSetException(handle, "NSDB", "no result data for row");
         DbCancel(handle);
+        return NS_ERROR;
+    }
+    if (Ns_SetSize(row) != contextPtr->ncolumns) {
+        Ns_DbSetException(handle, "NSDB", "row set does not match result columns");
         return NS_ERROR;
     }
 
@@ -338,7 +347,9 @@ DbGetRow(Ns_DbHandle *handle, Ns_Set *row)
         if (sqlite3_total_changes64(connectionPtr->db) != contextPtr->totalBefore) {
             connectionPtr->affected = sqlite3_changes64(connectionPtr->db);
         }
-        DbCancel(handle);
+        if (DbCancel(handle) != NS_OK) {
+            return NS_ERROR;
+        }
         return NS_END_DATA;
     }
 
@@ -381,7 +392,8 @@ DbResetHandle(Ns_DbHandle *handle)
     Connection *connectionPtr = (Connection *)handle->connection;
     sqlite3 *db = connectionPtr->db;
 
-    DbCancel(handle);
+    Ns_ReturnCode status = DbCancel(handle);
+
     connectionPtr->nrows = 0;
     connectionPtr->affected = 0;
     /* SQLite tracks BEGIN and outermost SAVEPOINT transactions alike. */
@@ -391,25 +403,30 @@ DbResetHandle(Ns_DbHandle *handle)
             return NS_ERROR;
         }
     }
-    return NS_OK;
+    return status;
 }
 
 
-static int
+static Ns_ReturnCode
 DbCancel(Ns_DbHandle *handle)
 {
-    Context         *contextPtr = (Context *) handle->statement;
+    Context *contextPtr = (Context *)handle->statement;
+    int rc = SQLITE_OK;
 
-    if (handle->statement == NULL) {
-        /* Already cancelled. */
-        return NS_OK;
-    }
-
-    sqlite3_finalize(contextPtr->stmt);
-    ns_free(contextPtr);
+    /* Detach the context even when finalization reports an execution error. */
     handle->statement = NULL;
-    handle->fetchingRows = 0;
-
+    handle->fetchingRows = NS_FALSE;
+    if (contextPtr != NULL) {
+        rc = sqlite3_finalize(contextPtr->stmt);
+        ns_free(contextPtr);
+    }
+    if (rc != SQLITE_OK) {
+        /* Keep the primary prepare/step diagnostic if already recorded. */
+        if (Tcl_DStringLength(&handle->dsExceptionMsg) == 0) {
+            DbError(handle, "finalizing SQL");
+        }
+        return NS_ERROR;
+    }
     return NS_OK;
 }
 
