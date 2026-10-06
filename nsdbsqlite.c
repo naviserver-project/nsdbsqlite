@@ -59,6 +59,7 @@ typedef struct {
     unsigned long   ncolumns;
     sqlite3_int64   totalBefore;
     sqlite3_stmt   *stmt;
+    bool            spPending;
 } Context;
 
 /*
@@ -70,6 +71,8 @@ static void DbError(Ns_DbHandle *handle, const char *operation);
 static Ns_ReturnCode DbCancel(Ns_DbHandle *handle);
 static int DbClose(Ns_DbHandle *handle);
 static int DbExec(Ns_DbHandle *handle, char *sql);
+static Ns_ReturnCode DbPrepare(Ns_DbHandle *handle, const char *sql);
+static int DbExecutePrepared(Ns_DbHandle *handle);
 static int DbFlush(Ns_DbHandle *handle);
 static Ns_ReturnCode DbResetHandle(Ns_DbHandle *handle);
 static int DbGetRow(Ns_DbHandle *handle, Ns_Set *row);
@@ -78,7 +81,7 @@ static const char *DbName(void);
 static Ns_ReturnCode DbOpen(Ns_DbHandle *handle);
 static Ns_ReturnCode DbServerInit(char *server, char *module, char *driver);
 static int DbSpExec(Ns_DbHandle *handle);
-static int DbSpStart(Ns_DbHandle *handle, char *procname);
+static Ns_ReturnCode DbSpStart(Ns_DbHandle *handle, char *procname);
 static const char *DbType(Ns_DbHandle *handle);
 #if NS_VERSION_NUM >= 50000
 static Tcl_Obj *DbVersionInfo(Ns_DbHandle *handle);
@@ -241,60 +244,65 @@ DbClose(Ns_DbHandle *handle)
     return status;
 }
 
-static int
-DbExec(Ns_DbHandle *handle, char *sql)
+/* Shared preparation keeps ordinary execution and the sp_* shim in sync. */
+static Ns_ReturnCode
+DbPrepare(Ns_DbHandle *handle, const char *sql)
 {
-    Connection      *connectionPtr = (Connection *)handle->connection;
-    sqlite3         *db = connectionPtr->db;
-    Context         *contextPtr = NULL;
-    int             status, rc;
-
-    status = NS_OK;
+    Connection *connectionPtr = (Connection *)handle->connection;
+    Context *contextPtr;
+    int rc;
 
     if (DbCancel(handle) != NS_OK) {
         return NS_ERROR;
     }
     contextPtr = ns_calloc(1, sizeof(Context));
-    contextPtr->ncolumns = 0;
     connectionPtr->nrows = 0;
     connectionPtr->affected = 0;
-    contextPtr->totalBefore = sqlite3_total_changes64(db);
-    handle->statement = (void *) contextPtr;
+    contextPtr->totalBefore = sqlite3_total_changes64(connectionPtr->db);
+    handle->statement = contextPtr;
 
-    rc = sqlite3_prepare_v2(db, sql, -1, &contextPtr->stmt, NULL);
-    if (rc !=  SQLITE_OK) {
+    rc = sqlite3_prepare_v2(connectionPtr->db, sql, -1, &contextPtr->stmt, NULL);
+    if (rc != SQLITE_OK) {
         DbError(handle, "preparing SQL");
-        status = NS_ERROR;
-    }
-
-    contextPtr->ncolumns = (unsigned long)sqlite3_column_count(contextPtr->stmt);
-
-    if (status == NS_ERROR) {
         DbCancel(handle);
         return NS_ERROR;
     }
+    contextPtr->ncolumns = (unsigned long)sqlite3_column_count(contextPtr->stmt);
+    return NS_OK;
+}
 
-    if (contextPtr->ncolumns == 0) { 
+static int
+DbExecutePrepared(Ns_DbHandle *handle)
+{
+    Connection *connectionPtr = (Connection *)handle->connection;
+    sqlite3 *db = connectionPtr->db;
+    Context *contextPtr = (Context *)handle->statement;
+
+    if (contextPtr->ncolumns == 0) {
         handle->fetchingRows = NS_FALSE;
-        /* for DML queries need to run sqlite3_step to execute  */
         if (sqlite3_step(contextPtr->stmt) != SQLITE_DONE) {
             DbError(handle, "executing SQL");
             DbCancel(handle);
-            status = NS_ERROR;
-        } else {
-            /* DDL and transaction commands leave sqlite3_changes unchanged. */
-            if (sqlite3_total_changes64(db) != contextPtr->totalBefore) {
-                connectionPtr->affected = sqlite3_changes64(db);
-            }
-            connectionPtr->nrows = connectionPtr->affected;
-            status = NS_DML;
+            return NS_ERROR;
         }
-    } else {
-        handle->fetchingRows = NS_TRUE;
-        status = NS_ROWS;
+        /* DDL and transaction commands leave sqlite3_changes unchanged. */
+        if (sqlite3_total_changes64(db) != contextPtr->totalBefore) {
+            connectionPtr->affected = sqlite3_changes64(db);
+        }
+        connectionPtr->nrows = connectionPtr->affected;
+        return NS_DML;
     }
+    handle->fetchingRows = NS_TRUE;
+    return NS_ROWS;
+}
 
-    return status;
+static int
+DbExec(Ns_DbHandle *handle, char *sql)
+{
+    if (DbPrepare(handle, sql) != NS_OK) {
+        return NS_ERROR;
+    }
+    return DbExecutePrepared(handle);
 }
 
 static Ns_Set *
@@ -431,22 +439,42 @@ DbCancel(Ns_DbHandle *handle)
 }
 
 
-static int
+/* SQLite has no native stored procedures; procname is SQL for this shim. */
+static Ns_ReturnCode
 DbSpStart(Ns_DbHandle *handle, char *procname)
 {
-    return DbExec(handle, procname);
+    Context *contextPtr;
+
+    if (DbPrepare(handle, procname) != NS_OK) {
+        return NS_ERROR;
+    }
+    contextPtr = (Context *)handle->statement;
+    if (contextPtr->stmt == NULL) {
+        Ns_DbSetException(handle, "NSDB", "no SQL statement for sp_start");
+        DbCancel(handle);
+        return NS_ERROR;
+    }
+    if (sqlite3_bind_parameter_count(contextPtr->stmt) != 0) {
+        Ns_DbSetException(handle, "NSDB", "sp_start does not support SQL parameters");
+        DbCancel(handle);
+        return NS_ERROR;
+    }
+    contextPtr->spPending = NS_TRUE;
+    return NS_OK;
 }
 
 static int
 DbSpExec(Ns_DbHandle *handle)
 {
-    Context         *contextPtr = (Context *) handle->statement;
+    Context *contextPtr = (Context *)handle->statement;
 
-    if (contextPtr == NULL) {
+    if (contextPtr == NULL || contextPtr->stmt == NULL || !contextPtr->spPending) {
+        Ns_DbSetException(handle, "NSDB", "no prepared SQL statement waiting for sp_exec");
         return NS_ERROR;
     }
-
-    return (contextPtr->ncolumns == 0 ? NS_DML : NS_ROWS);
+    /* Consume the pending execution even when stepping fails. */
+    contextPtr->spPending = NS_FALSE;
+    return DbExecutePrepared(handle);
 }
 
 

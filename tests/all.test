@@ -251,6 +251,91 @@ test sqlite-5.6 {step diagnostic survives finalization and connection recovers} 
     list [string match {*integer overflow*} $diagnostic] [ns_set get $row n]
 } -result {1 9}
 
+ns_db dml $h {CREATE TABLE sp_items (id INTEGER PRIMARY KEY)}
+test sqlite-6.1 {sp_start prepares DML without executing it} -body {
+    set started [ns_db sp_start $h {INSERT INTO sp_items VALUES (1)}]
+    ns_db cancel $h
+    set row [ns_db 1row $h {SELECT count(*) AS n FROM sp_items}]
+    list $started [ns_set get $row n]
+} -result {0 0}
+
+test sqlite-6.2 {sp_exec executes DML once and updates row counts} -body {
+    ns_db sp_start $h {INSERT INTO sp_items VALUES (1), (2)}
+    set executed [ns_db sp_exec $h]
+    set counts [rowCounts $h]
+    set repeated [catch {ns_db sp_exec $h}]
+    set row [ns_db 1row $h {SELECT count(*) AS n FROM sp_items}]
+    list $executed $counts $repeated [ns_set get $row n]
+} -result {NS_DML {2 2} 1 2}
+
+test sqlite-6.3 {sp_exec activates a result for bind and fetch} -body {
+    ns_db sp_start $h {SELECT id FROM sp_items ORDER BY id}
+    set before [catch {ns_db bindrow $h}]
+    set executed [ns_db sp_exec $h]
+    set repeated [catch {ns_db sp_exec $h}]
+    set row [ns_db bindrow $h]
+    set values {}
+    while {[ns_db getrow $h $row]} {lappend values [ns_set get $row id]}
+    list $before $executed $repeated $values [ns_db rowcount $h]
+} -result {1 NS_ROWS 1 {1 2} 2}
+
+test sqlite-6.4 {sp_exec rejects missing pending execution} -body {
+    ns_db resethandle $h
+    list [catch {ns_db sp_exec $h}] [ns_dberrormsg $h]
+} -result {1 {no prepared SQL statement waiting for sp_exec}}
+
+test sqlite-6.5 {sp_start rejects invalid empty and parameterized SQL} -body {
+    set failed [catch {ns_db sp_start $h {SELECT FROM}}]
+    set parse [string match {*syntax error*} [ns_dberrormsg $h]]
+    set empty [catch {ns_db sp_start $h { -- comment only}}]
+    set emptyMessage [ns_dberrormsg $h]
+    set parameter [catch {ns_db sp_start $h {SELECT :value}}]
+    list $failed $parse $empty $emptyMessage $parameter [ns_dberrormsg $h]
+} -result {1 1 1 {no SQL statement for sp_start} 1 {sp_start does not support SQL parameters}}
+
+test sqlite-6.6 {DML errors occur at sp_exec and consume pending execution} -body {
+    set started [ns_db sp_start $h {INSERT INTO sp_items VALUES (1)}]
+    set failed [catch {ns_db sp_exec $h}]
+    set diagnostic [string match {*UNIQUE constraint failed*} [ns_dberrormsg $h]]
+    list $started $failed $diagnostic [rowCounts $h] [catch {ns_db sp_exec $h}]
+} -result {0 1 1 {0 0} 1}
+
+test sqlite-6.7 {replacement cancels prepared shim without executing it} -body {
+    ns_db sp_start $h {INSERT INTO sp_items VALUES (3)}
+    ns_db sp_start $h {INSERT INTO sp_items VALUES (4)}
+    ns_db sp_exec $h
+    set row [ns_db 1row $h {SELECT group_concat(id, ',') AS ids FROM
+                         (SELECT id FROM sp_items ORDER BY id)}]
+    ns_set get $row ids
+} -result {1,2,4}
+
+test sqlite-6.8 {ordinary execution invalidates shim without consuming its result} -body {
+    ns_db sp_start $h {INSERT INTO sp_items VALUES (5)}
+    set row [ns_db select $h {SELECT count(*) AS n FROM sp_items}]
+    set failed [catch {ns_db sp_exec $h}]
+    ns_db getrow $h $row
+    set count [ns_set get $row n]
+    ns_db flush $h
+    list $failed $count
+} -result {1 3}
+
+test sqlite-6.9 {pool release cancels a prepared shim} -body {
+    ns_db sp_start $h {INSERT INTO sp_items VALUES (6)}
+    ns_db releasehandle $h
+    set h [ns_db gethandle sqlite]
+    set failed [catch {ns_db sp_exec $h}]
+    set row [ns_db 1row $h {SELECT count(*) AS n FROM sp_items}]
+    list $failed [ns_set get $row n]
+} -result {1 3}
+
+test sqlite-6.10 {RETURNING uses the same fetch and affected-row accounting} -body {
+    ns_db sp_start $h {UPDATE sp_items SET id = id + 10 RETURNING id}
+    set executed [ns_db sp_exec $h]
+    set row [ns_db bindrow $h]
+    while {[ns_db getrow $h $row]} {}
+    list $executed [rowCounts $h]
+} -result {NS_ROWS {3 3}}
+
 ns_db releasehandle $h
 set failed $::tcltest::numTests(Failed)
 cleanupTests

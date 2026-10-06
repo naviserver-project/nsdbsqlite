@@ -141,20 +141,6 @@ They are connection-local. `ns_sqlite rows_affected` supports 64-bit counts;
 `ns_db rowcount` returns an error value (-1) if the count exceeds its integer
 interface's range.
 
-## License
-
-The driver and build/test files use the Mozilla Public License 2.0; see
-LICENSE. SPDX-License-Identifier: MPL-2.0
-
-The bundled SQLite source and header retain their upstream
-copyright notices.
-
-## Authors
-
-* Dossy Shiobara - [dossy@panoptic.com](mailto:dossy@panoptic.com)
-* Vlad Seryakov - [vlad@crystalballinc.com](mailto:vlad@crystalballinc.com)
-* Gustaf Neumann
-
 
 ## Version information
 
@@ -179,3 +165,48 @@ SQLite finalization reports an error. Existing SQL diagnostics are preserved.
 Statement replacement stops if finalizing the previous statement fails. Reset
 still attempts to roll back an unfinished transaction, and close still attempts
 to close the connection; both report cleanup errors to their callers.
+
+## Stored-procedure compatibility
+
+SQLite has no native stored procedures. This driver supports the ns_db
+`sp_start`/`sp_exec` pair as a compatibility shim for SQL statements:
+
+```tcl
+ns_db sp_start $h {SELECT 1 AS value}
+# sp_start prepares SQL and returns 0 (NS_OK).
+ns_db sp_exec $h
+# Returns NS_ROWS; bind and fetch the result normally.
+set row [ns_db bindrow $h]
+while {[ns_db getrow $h $row]} {
+    ns_log notice "value: [ns_set get $row value]"
+}
+```
+
+For DML, `sp_start` prepares without stepping the statement; `sp_exec` executes
+it and returns `NS_DML`. Statements with results return `NS_ROWS` and execute
+as rows are fetched, like ordinary SELECT/RETURNING calls. Preparation errors
+are reported by `sp_start`; execution errors are reported by `sp_exec` or
+fetching. Row counts follow the ordinary execution rules.
+
+Each prepared shim can be executed once. A second `sp_exec`, or one without a
+successful `sp_start`, returns an error. Cancel, flush, reset, pool release,
+or preparing another statement discards pending execution. SQL requiring bind
+parameters is rejected; `sp_setparam`, `sp_getparams`, and `sp_returncode` remain
+unsupported. Use `ns_db exec`, `dml`, or `select` for ordinary SQL calls.
+
+---
+
+## License
+
+The driver and build/test files use the Mozilla Public License 2.0; see
+LICENSE. SPDX-License-Identifier: MPL-2.0
+
+The bundled SQLite source and header retain their upstream
+copyright notices.
+
+## Authors
+
+* Dossy Shiobara - [dossy@panoptic.com](mailto:dossy@panoptic.com)
+* Vlad Seryakov - [vlad@crystalballinc.com](mailto:vlad@crystalballinc.com)
+* Gustaf Neumann
+
