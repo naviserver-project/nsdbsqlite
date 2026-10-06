@@ -155,3 +155,15 @@ copyright notices.
 * Vlad Seryakov - [vlad@crystalballinc.com](mailto:vlad@crystalballinc.com)
 * Gustaf Neumann
 
+
+## Version information
+
+On NaviServer 5 and later, `ns_db info $h` includes `clientversion` and
+`serverversion`, matching the keys used by nsdbpg. Both report SQLite's runtime
+library version because its client library and database engine run in the same
+process. The numeric encoding is `major * 1000000 + minor * 1000 + patch`;
+SQLite 3.53.4 is reported as `3053004`.
+
+`ns_sqlite version $h` continues to return the version string. Driver startup
+also logs the driver version, runtime SQLite version, and compile-time header
+version. Inspecting versions does not execute SQL or alter results or counts.

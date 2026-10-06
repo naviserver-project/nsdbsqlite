@@ -80,6 +80,9 @@ static Ns_ReturnCode DbServerInit(char *server, char *module, char *driver);
 static int DbSpExec(Ns_DbHandle *handle);
 static int DbSpStart(Ns_DbHandle *handle, char *procname);
 static const char *DbType(Ns_DbHandle *handle);
+#if NS_VERSION_NUM >= 50000
+static Tcl_Obj *DbVersionInfo(Ns_DbHandle *handle);
+#endif
 
 static Ns_TclTraceProc DbInterpInit;
 static TCL_OBJCMDPROC_T DbObjCmd;
@@ -99,6 +102,9 @@ static Ns_DbProc dbProcs[] = {
     { DbFn_BindRow,      (ns_funcptr_t)DbBindRow },
     { DbFn_SpStart,      (ns_funcptr_t)DbSpStart },
     { DbFn_SpExec,       (ns_funcptr_t)DbSpExec },
+#if NS_VERSION_NUM >= 50000
+    { DbFn_Version,     (ns_funcptr_t)DbVersionInfo },
+#endif
     { 0, NULL }
 };
 
@@ -130,6 +136,8 @@ Ns_DbDriverInit(const char *driver, const char *UNUSED(configPath))
         Ns_Log(Error, "nsdbsqlite: could not register the '%s' driver.", driver);
         return NS_ERROR;
     }
+    Ns_Log(Notice, "nsdbsqlite: version %s loaded, based on SQLite %s (headers %s)",
+           DRIVER_VERSION, sqlite3_libversion(), SQLITE_VERSION);
     return NS_OK;
 }
 
@@ -156,6 +164,24 @@ DbType(Ns_DbHandle *UNUSED(handle))
 {
     return "sqlite";
 }
+
+#if NS_VERSION_NUM >= 50000
+/* SQLite's client library and database engine are the same runtime library. */
+static Tcl_Obj *
+DbVersionInfo(Ns_DbHandle *UNUSED(handle))
+{
+    Tcl_Obj *dictObj = Tcl_NewDictObj();
+    int version = sqlite3_libversion_number();
+
+    Tcl_DictObjPut(NULL, dictObj,
+                   Tcl_NewStringObj("clientversion", 13),
+                   Tcl_NewIntObj(version));
+    Tcl_DictObjPut(NULL, dictObj,
+                   Tcl_NewStringObj("serverversion", 13),
+                   Tcl_NewIntObj(version));
+    return dictObj;
+}
+#endif
 
 /* Preserve the SQLite diagnostic before finalizing a statement or connection. */
 static void

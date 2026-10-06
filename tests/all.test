@@ -177,6 +177,27 @@ test sqlite-3.9 {pool reset clears both counters for next borrower} -body {
     rowCounts $h
 } -result {0 0}
 
+test sqlite-4.1 {ns_db info reports runtime client and engine versions} -body {
+    set info [ns_db info $h]
+    lassign [split [ns_sqlite version $h] .] major minor patch
+    set expected [expr {$major * 1000000 + $minor * 1000 + $patch}]
+    list [expr {[dict get $info clientversion] == $expected}] \
+         [expr {[dict get $info serverversion] == $expected}] \
+         [dict get $info type] [dict get $info pool]
+} -result {1 1 sqlite sqlite}
+
+test sqlite-4.2 {version introspection leaves pending results and counts intact} -body {
+    set row [ns_db select $h {SELECT 10 AS n UNION ALL SELECT 20}]
+    ns_db getrow $h $row
+    set before [rowCounts $h]
+    ns_db info $h
+    set after [rowCounts $h]
+    ns_db getrow $h $row
+    set value [ns_set get $row n]
+    set done [ns_db getrow $h $row]
+    list $before $after $value $done [ns_db rowcount $h]
+} -result {{1 0} {1 0} 20 0 2}
+
 ns_db releasehandle $h
 set failed $::tcltest::numTests(Failed)
 cleanupTests
