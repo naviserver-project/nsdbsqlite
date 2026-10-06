@@ -96,6 +96,87 @@ test sqlite-2.5 {pool release clears unfinished read transaction} -body {
     catch {ns_db dml $h {ROLLBACK}}
 } -result {}
 
+ns_db dml $h {CREATE TABLE counts (id INTEGER PRIMARY KEY, value INTEGER)}
+proc rowCounts {h} {
+    list [ns_db rowcount $h] [ns_sqlite rows_affected $h]
+}
+test sqlite-3.1 {INSERT UPDATE DELETE report direct affected rows} -body {
+    ns_db dml $h {INSERT INTO counts VALUES (1, 10), (2, 20), (3, 30)}
+    set result [list [rowCounts $h]]
+    ns_db flush $h
+    lappend result [rowCounts $h]
+    ns_db dml $h {UPDATE counts SET value = value + 1 WHERE id <= 2}
+    lappend result [rowCounts $h]
+    ns_db dml $h {DELETE FROM counts WHERE id = 3}
+    lappend result [rowCounts $h]
+} -result {{3 3} {3 3} {2 2} {1 1}}
+
+test sqlite-3.2 {zero-match DML clears previous count} -body {
+    ns_db dml $h {UPDATE counts SET value = 0 WHERE id = 99}
+    rowCounts $h
+} -result {0 0}
+
+test sqlite-3.3 {SELECT counts fetched rows through result completion} -body {
+    ns_db dml $h {UPDATE counts SET value = value + 1}
+    set row [ns_db select $h {SELECT id FROM counts ORDER BY id}]
+    set result [list [rowCounts $h]]
+    ns_db getrow $h $row
+    lappend result [rowCounts $h]
+    ns_db getrow $h $row
+    lappend result [rowCounts $h]
+    ns_db getrow $h $row
+    lappend result [rowCounts $h]
+} -result {{0 0} {1 0} {2 0} {2 0}}
+
+test sqlite-3.4 {empty SELECT and partial flush preserve fetched counts} -body {
+    set row [ns_db select $h {SELECT id FROM counts WHERE id = 99}]
+    ns_db getrow $h $row
+    set result [list [rowCounts $h]]
+    set row [ns_db select $h {SELECT id FROM counts}]
+    ns_db getrow $h $row
+    ns_db flush $h
+    lappend result [rowCounts $h]
+} -result {{0 0} {1 0}}
+
+test sqlite-3.5 {DDL and transaction commands do not reuse DML count} -body {
+    ns_db dml $h {UPDATE counts SET value = value + 1}
+    ns_db dml $h {CREATE TABLE count_ddl (id INTEGER)}
+    set result [list [rowCounts $h]]
+    ns_db dml $h {BEGIN}
+    lappend result [rowCounts $h]
+    ns_db dml $h {COMMIT}
+    lappend result [rowCounts $h]
+} -result {{0 0} {0 0} {0 0}}
+
+test sqlite-3.6 {RETURNING reports affected count after completion} -body {
+    set row [ns_db select $h {UPDATE counts SET value = value + 1 RETURNING id}]
+    while {[ns_db getrow $h $row]} {}
+    rowCounts $h
+} -result {2 2}
+
+test sqlite-3.7 {trigger changes are excluded from direct affected count} -body {
+    ns_db dml $h {CREATE TABLE audit (id INTEGER)}
+    ns_db dml $h {CREATE TRIGGER counts_audit AFTER UPDATE ON counts
+                 BEGIN INSERT INTO audit VALUES (new.id); END}
+    ns_db dml $h {UPDATE counts SET value = value + 1}
+    rowCounts $h
+} -result {2 2}
+
+test sqlite-3.8 {errors clear previous operation counts} -body {
+    ns_db dml $h {UPDATE counts SET value = value + 1}
+    catch {ns_db dml $h {INSERT INTO counts VALUES (1, 0)}}
+    set result [list [rowCounts $h]]
+    catch {ns_db dml $h {SELECT FROM}}
+    lappend result [rowCounts $h]
+} -result {{0 0} {0 0}}
+
+test sqlite-3.9 {pool reset clears both counters for next borrower} -body {
+    ns_db dml $h {UPDATE counts SET value = value + 1}
+    ns_db releasehandle $h
+    set h [ns_db gethandle sqlite]
+    rowCounts $h
+} -result {0 0}
+
 ns_db releasehandle $h
 set failed $::tcltest::numTests(Failed)
 cleanupTests

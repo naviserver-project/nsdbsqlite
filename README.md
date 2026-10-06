@@ -108,3 +108,47 @@ Returning a handle to the pool finalizes pending statements and rolls back any
 unfinished transaction, including one opened by an outermost `SAVEPOINT`.
 `ns_db resethandle $h` performs the same cleanup explicitly. Committed changes
 are preserved. Reset reports SQLite errors if rollback fails.
+
+## Refreshing bundled SQLite
+
+The refresh target downloads a release tag from SQLite's official Git mirror
+at <https://github.com/sqlite/sqlite>, configures the upstream source, and
+builds its amalgamation. `SQLITE_VERSION` defaults to `3.53.4`:
+
+```bash
+make refresh-sqlite
+# Select a different release explicitly:
+make refresh-sqlite SQLITE_VERSION=3.53.4
+make test
+```
+
+Refreshing requires network access, `curl`, `tar`, `make`, and the upstream
+SQLite build tools (a C compiler and the tools required by its configure/build
+scripts). It does not require a Tcl source distribution. `CURL` can override
+the download command.
+
+Both `sqlite3.c` and `sqlite3.h` are generated in a temporary directory and
+validated against the requested version before replacing local files. Their
+upstream public-domain notices are preserved. Identical files retain their
+timestamps. Downloads and generation are explicit maintenance operations;
+normal builds use the checked-in files and require no network access.
+
+Review the resulting diff and run `make test` before committing a refresh.
+
+## Row counts
+
+`ns_db rowcount $h` reports directly affected rows for successful
+INSERT/UPDATE/DELETE statements. For SELECT, it reports rows fetched so far,
+including after reaching the end of the result or flushing a partial result.
+SQLite streams results, so the total is not known before fetching.
+
+`ns_sqlite rows_affected $h` reports direct modifications by the current or
+most recently executed statement, excluding trigger and foreign-key side
+effects. It remains available after statement cleanup. SELECT, DDL and
+transaction commands report zero affected rows. Statements with `RETURNING`
+publish their affected count after fetching to completion.
+
+Both counters start at zero for a new SQL operation or a reset/released handle.
+They are connection-local. `ns_sqlite rows_affected` supports 64-bit counts;
+`ns_db rowcount` returns an error value (-1) if the count exceeds its integer
+interface's range.

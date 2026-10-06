@@ -21,6 +21,7 @@
 #include "ns.h"
 #include "nsdb.h"
 #include "sqlite3.h"
+#include <limits.h>
 
 #define DRIVER_VERSION "0.9"
 
@@ -48,9 +49,14 @@ Ns_ModuleGetInfo(Ns_ModuleInfo *infoPtr)
 #endif
 
 typedef struct {
+    sqlite3       *db;
+    sqlite3_int64  nrows;
+    sqlite3_int64  affected;
+} Connection;
+
+typedef struct {
     unsigned long   ncolumns;
-    unsigned long   nrows;
-    unsigned long  row;
+    sqlite3_int64   totalBefore;
     sqlite3_stmt   *stmt;
 } Context;
 
@@ -154,7 +160,7 @@ DbType(Ns_DbHandle *UNUSED(handle))
 static void
 DbError(Ns_DbHandle *handle, const char *operation)
 {
-    const char *message = sqlite3_errmsg((sqlite3 *)handle->connection);
+    const char *message = sqlite3_errmsg(((Connection *)handle->connection)->db);
 
     Ns_Log(Error, "nsdbsqlite: %s: %s", operation, message);
     Ns_DbSetException(handle, "NSDB", message);
@@ -164,6 +170,7 @@ static Ns_ReturnCode
 DbOpen(Ns_DbHandle *handle)
 {
     sqlite3         *db = NULL;
+    Connection      *connectionPtr;
 
     int rc = sqlite3_open(handle->datasource, &db);
 
@@ -178,7 +185,10 @@ DbOpen(Ns_DbHandle *handle)
         return NS_ERROR;
     }
 
-    handle->connection = (void *) db;
+    connectionPtr = ns_calloc(1, sizeof(Connection));
+
+    connectionPtr->db = db;
+    handle->connection = connectionPtr;
     handle->connected = NS_TRUE;
     handle->statement = NULL;
 
@@ -188,13 +198,15 @@ DbOpen(Ns_DbHandle *handle)
 static int
 DbClose(Ns_DbHandle *handle)
 {
-    sqlite3         *db = (sqlite3 *) handle->connection;
+    Connection      *connectionPtr = (Connection *)handle->connection;
+    sqlite3         *db = connectionPtr->db;
 
     DbCancel(handle);
     if (sqlite3_close(db) != SQLITE_OK) {
         DbError(handle, "closing database");
         return NS_ERROR;
     }
+    ns_free(connectionPtr);
     handle->connection = NULL;
     handle->connected = NS_FALSE;
 
@@ -204,7 +216,8 @@ DbClose(Ns_DbHandle *handle)
 static int
 DbExec(Ns_DbHandle *handle, char *sql)
 {
-    sqlite3         *db = (sqlite3 *) handle->connection;
+    Connection      *connectionPtr = (Connection *)handle->connection;
+    sqlite3         *db = connectionPtr->db;
     Context         *contextPtr = NULL;
     int             status, rc;
 
@@ -213,8 +226,9 @@ DbExec(Ns_DbHandle *handle, char *sql)
     DbCancel(handle);
     contextPtr = ns_calloc(1, sizeof(Context));
     contextPtr->ncolumns = 0;
-    contextPtr->nrows = 0;
-    contextPtr->row = 0;
+    connectionPtr->nrows = 0;
+    connectionPtr->affected = 0;
+    contextPtr->totalBefore = sqlite3_total_changes64(db);
     handle->statement = (void *) contextPtr;
 
     rc = sqlite3_prepare_v2(db, sql, -1, &contextPtr->stmt, NULL);
@@ -238,6 +252,11 @@ DbExec(Ns_DbHandle *handle, char *sql)
             DbCancel(handle);
             status = NS_ERROR;
         } else {
+            /* DDL and transaction commands leave sqlite3_changes unchanged. */
+            if (sqlite3_total_changes64(db) != contextPtr->totalBefore) {
+                connectionPtr->affected = sqlite3_changes64(db);
+            }
+            connectionPtr->nrows = connectionPtr->affected;
             status = NS_DML;
         }
     } else {
@@ -286,6 +305,12 @@ DbGetRow(Ns_DbHandle *handle, Ns_Set *row)
     }
 
     if ((status = sqlite3_step(contextPtr->stmt)) == SQLITE_DONE) {
+        Connection *connectionPtr = (Connection *)handle->connection;
+
+        /* RETURNING statements publish their affected count at completion. */
+        if (sqlite3_total_changes64(connectionPtr->db) != contextPtr->totalBefore) {
+            connectionPtr->affected = sqlite3_changes64(connectionPtr->db);
+        }
         DbCancel(handle);
         return NS_END_DATA;
     }
@@ -296,6 +321,7 @@ DbGetRow(Ns_DbHandle *handle, Ns_Set *row)
         return NS_ERROR;
     }
 
+    ((Connection *)handle->connection)->nrows++;
     for (col = 0; col < contextPtr->ncolumns; col++) {
       Ns_SetPutValue(row, col, (const char *)sqlite3_column_text(contextPtr->stmt, (int)col));
     }
@@ -306,13 +332,13 @@ DbGetRow(Ns_DbHandle *handle, Ns_Set *row)
 static int
 DbGetRowCount(Ns_DbHandle *handle)
 {
-    Context         *contextPtr = (Context *) handle->statement;
+    const Connection *connectionPtr = (Connection *)handle->connection;
 
-    if (handle->statement == NULL || !handle->fetchingRows) {
-        Ns_DbSetException(handle, "NSDB", "no rows waiting to fetch");
+    if (connectionPtr->nrows > INT_MAX) {
+        Ns_DbSetException(handle, "NSDB", "row count exceeds ns_db integer range");
         return NS_ERROR;
     }
-    return (int)contextPtr->nrows;
+    return (int)connectionPtr->nrows;
 }
 
 static int
@@ -325,9 +351,12 @@ DbFlush(Ns_DbHandle *handle)
 static Ns_ReturnCode
 DbResetHandle(Ns_DbHandle *handle)
 {
-    sqlite3 *db = (sqlite3 *)handle->connection;
+    Connection *connectionPtr = (Connection *)handle->connection;
+    sqlite3 *db = connectionPtr->db;
 
     DbCancel(handle);
+    connectionPtr->nrows = 0;
+    connectionPtr->affected = 0;
     /* SQLite tracks BEGIN and outermost SAVEPOINT transactions alike. */
     if (sqlite3_get_autocommit(db) == 0) {
         if (sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK) {
@@ -373,7 +402,7 @@ DbSpExec(Ns_DbHandle *handle)
         return NS_ERROR;
     }
 
-    return (contextPtr->nrows == 0 ? NS_DML : NS_ROWS);
+    return (contextPtr->ncolumns == 0 ? NS_DML : NS_ROWS);
 }
 
 
@@ -398,7 +427,6 @@ static int
 DbObjCmd(ClientData UNUSED(clientData), Tcl_Interp *interp, int objc, Tcl_Obj * CONST objv[])
 {
     Ns_DbHandle         *handle;
-    Context             *contextPtr;
     static CONST char   *opts[] = {
         "rows_affected", "version", NULL
     };
@@ -427,14 +455,8 @@ DbObjCmd(ClientData UNUSED(clientData), Tcl_Interp *interp, int objc, Tcl_Obj * 
 
     switch (opt) {
     case IRowsAffectedIdx:
-        /* == [ns_freetds rows_affected $db] == */
-        contextPtr = (Context *) handle->statement;
-        if (contextPtr == NULL) {
-            Tcl_AppendResult(interp, "handle \"", Tcl_GetString(objv[2]),
-                    "\" has no current statement", NULL);
-            return TCL_ERROR;
-        }
-        Tcl_SetObjResult(interp, Tcl_NewLongObj(sqlite3_changes(handle->connection)));
+        Tcl_SetObjResult(interp, Tcl_NewWideIntObj(
+                (Tcl_WideInt)((Connection *)handle->connection)->affected));
         break;
 
     case IVersionIdx:
