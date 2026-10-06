@@ -72,6 +72,7 @@ static Ns_ReturnCode DbCancel(Ns_DbHandle *handle);
 static int DbClose(Ns_DbHandle *handle);
 static int DbExec(Ns_DbHandle *handle, char *sql);
 static Ns_ReturnCode DbPrepare(Ns_DbHandle *handle, const char *sql);
+static bool DbSqlTailIsEmpty(const char *tail);
 static int DbExecutePrepared(Ns_DbHandle *handle);
 static int DbFlush(Ns_DbHandle *handle);
 static Ns_ReturnCode DbResetHandle(Ns_DbHandle *handle);
@@ -244,12 +245,47 @@ DbClose(Ns_DbHandle *handle)
     return status;
 }
 
+/* SQLite already found the statement boundary; inspect only its unused tail.
+ * Do not prepare the tail: some PRAGMAs have effects during preparation.
+ */
+static bool
+DbSqlTailIsEmpty(const char *tail)
+{
+    const char *p = tail;
+
+    while (*p != '\0') {
+        /* SQLite's ASCII whitespace plus empty statement separators. */
+        if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r'
+            || *p == '\f' || *p == ';') {
+            p++;
+        } else if (p[0] == '-' && p[1] == '-') {
+            p += 2;
+            while (*p != '\0' && *p != '\n') {
+                p++;
+            }
+        } else if (p[0] == '/' && p[1] == '*') {
+            p += 2;
+            while (*p != '\0' && !(p[0] == '*' && p[1] == '/')) {
+                p++;
+            }
+            /* SQLite accepts a block comment continuing to end of input. */
+            if (*p != '\0') {
+                p += 2;
+            }
+        } else {
+            return NS_FALSE;
+        }
+    }
+    return NS_TRUE;
+}
+
 /* Shared preparation keeps ordinary execution and the sp_* shim in sync. */
 static Ns_ReturnCode
 DbPrepare(Ns_DbHandle *handle, const char *sql)
 {
     Connection *connectionPtr = (Connection *)handle->connection;
     Context *contextPtr;
+    const char *tail;
     int rc;
 
     if (DbCancel(handle) != NS_OK) {
@@ -261,9 +297,19 @@ DbPrepare(Ns_DbHandle *handle, const char *sql)
     contextPtr->totalBefore = sqlite3_total_changes64(connectionPtr->db);
     handle->statement = contextPtr;
 
-    rc = sqlite3_prepare_v2(connectionPtr->db, sql, -1, &contextPtr->stmt, NULL);
+    rc = sqlite3_prepare_v2(connectionPtr->db, sql, -1, &contextPtr->stmt, &tail);
     if (rc != SQLITE_OK) {
         DbError(handle, "preparing SQL");
+        DbCancel(handle);
+        return NS_ERROR;
+    }
+    if (contextPtr->stmt == NULL) {
+        Ns_DbSetException(handle, "NSDB", "no SQL statement");
+        DbCancel(handle);
+        return NS_ERROR;
+    }
+    if (!DbSqlTailIsEmpty(tail)) {
+        Ns_DbSetException(handle, "NSDB", "SQL after the first statement is not supported");
         DbCancel(handle);
         return NS_ERROR;
     }
@@ -449,11 +495,6 @@ DbSpStart(Ns_DbHandle *handle, char *procname)
         return NS_ERROR;
     }
     contextPtr = (Context *)handle->statement;
-    if (contextPtr->stmt == NULL) {
-        Ns_DbSetException(handle, "NSDB", "no SQL statement for sp_start");
-        DbCancel(handle);
-        return NS_ERROR;
-    }
     if (sqlite3_bind_parameter_count(contextPtr->stmt) != 0) {
         Ns_DbSetException(handle, "NSDB", "sp_start does not support SQL parameters");
         DbCancel(handle);

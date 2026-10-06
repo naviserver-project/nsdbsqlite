@@ -194,6 +194,24 @@ or preparing another statement discards pending execution. SQL requiring bind
 parameters is rejected; `sp_setparam`, `sp_getparams`, and `sp_returncode` remain
 unsupported. Use `ns_db exec`, `dml`, or `select` for ordinary SQL calls.
 
+## SQL statement boundaries
+
+`exec`, `dml`, `select`, the row helpers, and the `sp_start` compatibility shim
+accept one executable SQL statement per call. Trailing whitespace, comments,
+and empty semicolon separators are allowed. SQLite determines the boundary of
+the first statement, so semicolons in strings, quoted identifiers, and trigger
+bodies are handled correctly. Empty or comment-only input returns
+`no SQL statement`.
+
+Additional SQL or malformed trailing text is rejected before stepping the first
+statement; it is never silently discarded. The tail is not prepared, since some
+PRAGMAs change settings during preparation. As with SQLite generally, preparing
+the first statement can itself have effects for certain PRAGMAs.
+
+Unlike nsdbpg's `PQexec` batch execution, this driver exposes one statement and
+one result per call. Send separate calls inside an explicit transaction when
+several operations must succeed together.
+
 ---
 
 ## License

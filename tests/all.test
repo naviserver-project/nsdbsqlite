@@ -291,7 +291,7 @@ test sqlite-6.5 {sp_start rejects invalid empty and parameterized SQL} -body {
     set emptyMessage [ns_dberrormsg $h]
     set parameter [catch {ns_db sp_start $h {SELECT :value}}]
     list $failed $parse $empty $emptyMessage $parameter [ns_dberrormsg $h]
-} -result {1 1 1 {no SQL statement for sp_start} 1 {sp_start does not support SQL parameters}}
+} -result {1 1 1 {no SQL statement} 1 {sp_start does not support SQL parameters}}
 
 test sqlite-6.6 {DML errors occur at sp_exec and consume pending execution} -body {
     set started [ns_db sp_start $h {INSERT INTO sp_items VALUES (1)}]
@@ -335,6 +335,76 @@ test sqlite-6.10 {RETURNING uses the same fetch and affected-row accounting} -bo
     while {[ns_db getrow $h $row]} {}
     list $executed [rowCounts $h]
 } -result {NS_ROWS {3 3}}
+
+ns_db dml $h {CREATE TABLE tail_items (id INTEGER PRIMARY KEY, value TEXT)}
+test sqlite-7.1 {trailing separators and comments are accepted} -body {
+    set row [ns_db 1row $h "SELECT 7 AS n; ; \t /* comment; SELECT 99 */ -- trailing;\n ;"]
+    ns_set get $row n
+} -result 7
+
+test sqlite-7.2 {semicolon inside a quoted literal is not a statement boundary} -body {
+    set row [ns_db 1row $h {SELECT 'a; -- /* b' AS value; /* trailing */}]
+    ns_set get $row value
+} -result {a; -- /* b}
+
+test sqlite-7.3 {rejected batch does not execute its first DML statement} -body {
+    set failed [catch {ns_db dml $h {INSERT INTO tail_items VALUES (1, 'one');
+                                   DELETE FROM tail_items}}]
+    set diagnostic [ns_dberrormsg $h]
+    set counts [rowCounts $h]
+    set row [ns_db 1row $h {SELECT count(*) AS n FROM tail_items}]
+    list $failed $diagnostic $counts [ns_set get $row n]
+} -result {1 {SQL after the first statement is not supported} {0 0} 0}
+
+test sqlite-7.4 {tail validation does not prepare a side-effecting PRAGMA} -body {
+    ns_db dml $h {PRAGMA foreign_keys = OFF}
+    set failed [catch {ns_db exec $h {SELECT 1; PRAGMA foreign_keys = ON}}]
+    set row [ns_db 1row $h {PRAGMA foreign_keys}]
+    list $failed [ns_set value $row 0]
+} -result {1 0}
+
+test sqlite-7.5 {malformed trailing text is rejected without first-statement effects} -body {
+    set failed [catch {ns_db dml $h {INSERT INTO tail_items VALUES (2, 'two'); garbage}}]
+    set row [ns_db 1row $h {SELECT count(*) AS n FROM tail_items}]
+    list $failed [ns_set get $row n]
+} -result {1 0}
+
+test sqlite-7.6 {empty whitespace comment and separator inputs have a clear error} -body {
+    set result {}
+    foreach sql [list {} " \t\n" {-- comment} {/* comment */} {; ; /* comment */}] {
+        lappend result [list [catch {ns_db exec $h $sql}] [ns_dberrormsg $h]]
+    }
+    set result
+} -result {{1 {no SQL statement}} {1 {no SQL statement}} {1 {no SQL statement}} {1 {no SQL statement}} {1 {no SQL statement}}}
+
+test sqlite-7.7 {trigger body semicolons stay within the first statement} -body {
+    ns_db dml $h {CREATE TABLE tail_audit (value TEXT)}
+    ns_db dml $h {CREATE TRIGGER tail_trigger AFTER INSERT ON tail_items BEGIN
+                     INSERT INTO tail_audit VALUES ('first;entry');
+                     INSERT INTO tail_audit VALUES ('second');
+                 END; /* trailing */ ;}
+    ns_db dml $h {INSERT INTO tail_items VALUES (3, 'three')}
+    set row [ns_db 1row $h {SELECT count(*) AS n FROM tail_audit}]
+    ns_set get $row n
+} -result 2
+
+test sqlite-7.8 {sp_start uses the same SQL-tail validation} -body {
+    set failed [catch {ns_db sp_start $h {INSERT INTO tail_items VALUES (4, 'four'); SELECT 1}}]
+    set pending [catch {ns_db sp_exec $h}]
+    ns_db sp_start $h {SELECT 'shim;value' AS value; -- trailing}
+    ns_db sp_exec $h
+    set row [ns_db bindrow $h]
+    ns_db getrow $h $row
+    set value [ns_set get $row value]
+    ns_db flush $h
+    set row [ns_db 1row $h {SELECT count(*) AS n FROM tail_items WHERE id = 4}]
+    list $failed $pending $value [ns_set get $row n]
+} -result {1 1 {shim;value} 0}
+
+test sqlite-7.9 {an unterminated trailing block comment follows SQLite syntax} -body {
+    set row [ns_db 1row $h {SELECT 9 AS n; /* comment to end}]
+    ns_set get $row n
+} -result 9
 
 ns_db releasehandle $h
 set failed $::tcltest::numTests(Failed)
