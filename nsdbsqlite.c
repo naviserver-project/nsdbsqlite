@@ -13,8 +13,9 @@
  *
  *      Implements the nsdb driver interface for the  SQLite database.
  *
- *   Author Vlad Seryakov vlad@crystalballinc.com
- *   Gustaf Neumann neumann@wu.ac.at
+ *   Dossy Shiobara <dossy@panoptic.com>
+ *   Author Vlad Seryakov <vlad@crystalballinc.com>
+ *   Gustaf Neumann <neumann@wu.ac.at>
  *
  */
 

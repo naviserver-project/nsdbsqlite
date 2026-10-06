@@ -82,24 +82,12 @@ ns_db releasehandle $h
 
 ---
 
-## Authors
-
-* Dossy Shiobara – [dossy@panoptic.com](mailto:dossy@panoptic.com)
-* Vlad Seryakov – [vlad@crystalballinc.com](mailto:vlad@crystalballinc.com)
-
-```
-
 ## Tests
 
 Run `make test` (or `make NAVISERVER=/path/to/ns test`). The tests start
 an isolated NaviServer instance without a network listener and use a temporary
 database. `TESTFLAGS` accepts tcltest options, for example `-verbose bpse`.
 
-## License
-
-The driver and build/test files use the Mozilla Public License 2.0; see
-LICENSE. The bundled SQLite source and header retain their upstream
-public-domain notices.
 
 ## Pooled transactions
 
@@ -152,3 +140,18 @@ Both counters start at zero for a new SQL operation or a reset/released handle.
 They are connection-local. `ns_sqlite rows_affected` supports 64-bit counts;
 `ns_db rowcount` returns an error value (-1) if the count exceeds its integer
 interface's range.
+
+## License
+
+The driver and build/test files use the Mozilla Public License 2.0; see
+LICENSE. SPDX-License-Identifier: MPL-2.0
+
+The bundled SQLite source and header retain their upstream
+copyright notices.
+
+## Authors
+
+* Dossy Shiobara - [dossy@panoptic.com](mailto:dossy@panoptic.com)
+* Vlad Seryakov - [vlad@crystalballinc.com](mailto:vlad@crystalballinc.com)
+* Gustaf Neumann
+
