@@ -186,7 +186,7 @@ DbConfigureDatasources(const char *driver)
     }
 }
 
-static Ns_ReturnCode DbInterpInit(Tcl_Interp * interp, const void *UNUSED(arg))
+static int DbInterpInit(Tcl_Interp * interp, const void *UNUSED(arg))
 {
     TCL_CREATEOBJCOMMAND(interp, "ns_sqlite", DbObjCmd, NULL, NULL);
     return NS_OK;
@@ -578,10 +578,10 @@ DbSpExec(Ns_DbHandle *handle)
 
 
 static int
-DbObjCmd(ClientData UNUSED(clientData), Tcl_Interp *interp, int objc, Tcl_Obj * CONST objv[])
+DbObjCmd(ClientData UNUSED(clientData), Tcl_Interp *interp, TCL_SIZE_T objc, Tcl_Obj *const objv[])
 {
     Ns_DbHandle         *handle;
-    static CONST char   *opts[] = {
+    static const char *const opts[] = {
         "rows_affected", "version", NULL
     };
     enum {
@@ -621,8 +621,7 @@ DbObjCmd(ClientData UNUSED(clientData), Tcl_Interp *interp, int objc, Tcl_Obj * 
         break;
 
     case IVersionIdx:
-        /* == [ns_freetds version $db] == */
-        Tcl_SetResult(interp, (char *) sqlite3_version, TCL_STATIC);
+        Tcl_SetObjResult(interp, Tcl_NewStringObj(sqlite3_libversion(), TCL_INDEX_NONE));
         break;
     }
     return TCL_OK;
