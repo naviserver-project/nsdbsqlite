@@ -8,11 +8,14 @@
  * America Online, Inc. All Rights Reserved.
  */
 
-
 /* 
  * nsdbsqlite.c --
  *
- *	This file implements the SQLite 3 database driver.
+ *      Implements the nsdb driver interface for the  SQLite database.
+ *
+ *   Author Vlad Seryakov vlad@crystalballinc.com
+ *   Gustaf Neumann neumann@wu.ac.at
+ *
  */
 
 #include "ns.h"
@@ -28,6 +31,21 @@
 
 NS_EXPORT int   Ns_ModuleVersion = 1;
 NS_EXPORT NsDb_DriverInitProc Ns_DbDriverInit;
+
+#if defined(NS_MODULE_INFO_VERSION) && defined(NS_MODULE_TAG)
+NS_EXPORT Ns_ModuleInfoProc Ns_ModuleGetInfo;
+/* Provide module build and ABI information for runtime introspection. */
+NS_EXPORT void
+Ns_ModuleGetInfo(Ns_ModuleInfo *infoPtr)
+{
+    Ns_ModuleInfoInit(infoPtr, NS_MODULE_INFO_VERSION,
+                      NS_MODULE_NAME,
+                      DRIVER_VERSION,
+                      NS_MODULE_TAG,
+                      "db-driver",
+                      1u);
+}
+#endif
 
 typedef struct {
     unsigned long   ncolumns;
