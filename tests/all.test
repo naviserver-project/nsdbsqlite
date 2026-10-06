@@ -29,6 +29,73 @@ test sqlite-1.5 {normal result completion} -body {
     set row [ns_db select $h {SELECT id FROM items}]
     list [ns_db getrow $h $row] [ns_set get $row id] [ns_db getrow $h $row]
 } -result {1 1 0}
+test sqlite-2.1 {pool release rolls back unfinished writes} -body {
+    ns_db dml $h {BEGIN}
+    ns_db dml $h {INSERT INTO items VALUES (2)}
+    ns_db releasehandle $h
+    set h [ns_db gethandle sqlite]
+    set row [ns_db 1row $h {SELECT count(*) AS n FROM items WHERE id = 2}]
+    set count [ns_set get $row n]
+    ns_db dml $h {BEGIN}
+    ns_db dml $h {ROLLBACK}
+    set count
+} -cleanup {
+    ns_db flush $h
+    catch {ns_db dml $h {ROLLBACK}}
+} -result 0
+
+test sqlite-2.2 {pool release preserves committed writes} -body {
+    ns_db dml $h {BEGIN}
+    ns_db dml $h {INSERT INTO items VALUES (3)}
+    ns_db dml $h {COMMIT}
+    ns_db releasehandle $h
+    set h [ns_db gethandle sqlite]
+    set row [ns_db 1row $h {SELECT count(*) AS n FROM items WHERE id = 3}]
+    ns_set get $row n
+} -cleanup {
+    ns_db flush $h
+    catch {ns_db dml $h {ROLLBACK}}
+} -result 1
+
+test sqlite-2.3 {explicit reset finalizes active result and rolls back} -body {
+    ns_db dml $h {BEGIN}
+    ns_db dml $h {INSERT INTO items VALUES (4)}
+    set row [ns_db select $h {SELECT id FROM items}]
+    ns_db getrow $h $row
+    ns_db resethandle $h
+    ns_db resethandle $h
+    set row [ns_db 1row $h {SELECT count(*) AS n FROM items WHERE id = 4}]
+    ns_set get $row n
+} -cleanup {
+    ns_db flush $h
+    catch {ns_db dml $h {ROLLBACK}}
+} -result 0
+
+test sqlite-2.4 {pool release rolls back outermost savepoint} -body {
+    ns_db dml $h {SAVEPOINT outer_tx}
+    ns_db dml $h {INSERT INTO items VALUES (5)}
+    ns_db releasehandle $h
+    set h [ns_db gethandle sqlite]
+    set row [ns_db 1row $h {SELECT count(*) AS n FROM items WHERE id = 5}]
+    ns_set get $row n
+} -cleanup {
+    ns_db flush $h
+    catch {ns_db dml $h {ROLLBACK}}
+} -result 0
+
+test sqlite-2.5 {pool release clears unfinished read transaction} -body {
+    ns_db dml $h {BEGIN}
+    set row [ns_db select $h {SELECT id FROM items}]
+    ns_db getrow $h $row
+    ns_db releasehandle $h
+    set h [ns_db gethandle sqlite]
+    ns_db dml $h {BEGIN}
+    ns_db dml $h {ROLLBACK}
+} -cleanup {
+    ns_db flush $h
+    catch {ns_db dml $h {ROLLBACK}}
+} -result {}
+
 ns_db releasehandle $h
 set failed $::tcltest::numTests(Failed)
 cleanupTests

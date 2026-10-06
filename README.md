@@ -100,3 +100,11 @@ database. `TESTFLAGS` accepts tcltest options, for example `-verbose bpse`.
 The driver and build/test files use the Mozilla Public License 2.0; see
 LICENSE. The bundled SQLite source and header retain their upstream
 public-domain notices.
+
+## Pooled transactions
+
+Finish successful transactions with `COMMIT` before releasing a handle.
+Returning a handle to the pool finalizes pending statements and rolls back any
+unfinished transaction, including one opened by an outermost `SAVEPOINT`.
+`ns_db resethandle $h` performs the same cleanup explicitly. Committed changes
+are preserved. Reset reports SQLite errors if rollback fails.

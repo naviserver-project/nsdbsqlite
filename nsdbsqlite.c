@@ -46,6 +46,7 @@ static int DbCancel(Ns_DbHandle *handle);
 static int DbClose(Ns_DbHandle *handle);
 static int DbExec(Ns_DbHandle *handle, char *sql);
 static int DbFlush(Ns_DbHandle *handle);
+static Ns_ReturnCode DbResetHandle(Ns_DbHandle *handle);
 static int DbGetRow(Ns_DbHandle *handle, Ns_Set *row);
 static int DbGetRowCount(Ns_DbHandle *handle);
 static const char *DbName(void);
@@ -68,6 +69,7 @@ static Ns_DbProc dbProcs[] = {
     { DbFn_GetRowCount,  (ns_funcptr_t)DbGetRowCount },
     { DbFn_Flush,        (ns_funcptr_t)DbFlush },
     { DbFn_Cancel,       (ns_funcptr_t)DbCancel },
+    { DbFn_ResetHandle,  (ns_funcptr_t)DbResetHandle },
     { DbFn_Exec,         (ns_funcptr_t)DbExec },
     { DbFn_BindRow,      (ns_funcptr_t)DbBindRow },
     { DbFn_SpStart,      (ns_funcptr_t)DbSpStart },
@@ -300,6 +302,24 @@ DbFlush(Ns_DbHandle *handle)
 {
     return DbCancel(handle);
 }
+
+/* Reset both explicit calls and connections being returned to the pool. */
+static Ns_ReturnCode
+DbResetHandle(Ns_DbHandle *handle)
+{
+    sqlite3 *db = (sqlite3 *)handle->connection;
+
+    DbCancel(handle);
+    /* SQLite tracks BEGIN and outermost SAVEPOINT transactions alike. */
+    if (sqlite3_get_autocommit(db) == 0) {
+        if (sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK) {
+            DbError(handle, "rolling back unfinished transaction");
+            return NS_ERROR;
+        }
+    }
+    return NS_OK;
+}
+
 
 static int
 DbCancel(Ns_DbHandle *handle)
