@@ -33,11 +33,6 @@ sudo make NAVISERVER=/opt/local/ns499/ install
 ## Configuration Snippet
 
 ```tcl
-# Use the same home value configured in ns/parameters.
-set home /usr/local/ns
-set dbdir [file join $home data sqlite]
-file mkdir $dbdir
-
 ns_section ns/db/drivers {
     ns_param sqlite       nsdbsqlite.so
 }
@@ -81,8 +76,10 @@ existing SQLite behavior; this completion does not enable URI processing.
 For example, `ns_param datasource mail.db` uses the logical database
 `<NaviServer home>/data/sqlite/mail.db`, regardless of the pool name. The
 `datasource` parameter remains required; the driver does not invent a database
-name when it is omitted. Create the data directory, including any relative
-subdirectories, before opening a pool. Existing configurations with relative
+name when it is omitted. For relative datasources, driver initialization ensures
+that `<home>/data` and `<home>/data/sqlite` exist, reporting an error if creation
+fails. Provision custom absolute directories and relative subdirectories before
+opening their pools; the driver does not create those directories. Existing configurations with relative
 paths must use an absolute path to preserve their previous location.
 
 Keep related tables together when operations need a common transaction. Choose
@@ -92,8 +89,9 @@ provide accompanying standalone services such as nssmtpd persistence.
 
 Keep database files outside the page root. The server account needs write access
 to the containing directory and the database, since SQLite creates journal,
-WAL, and shared-memory files alongside it. The configuration example creates
-the data directory explicitly; SQLite creates the database on its first open.
+WAL, and shared-memory files alongside it. The server account also needs permission
+to create the standard data directories if missing. Installers or Docker volume
+provisioning can create them in advance. SQLite creates the database on its first open.
 Use a persistent local volume and include these databases in the site's backup
 and recovery procedures. Back up live databases with SQLite's backup facilities
 or after a clean shutdown rather than copying a database file during writes.

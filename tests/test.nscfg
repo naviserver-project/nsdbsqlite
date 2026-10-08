@@ -8,7 +8,7 @@ set stub [file join $naviserver bin nsdbtest.so]
 set testPools sqlite,relative,shared,memory,nested,temporary,normalized,uri
 if {[file exists $stub]} {append testPools ,foreign}
 set home [file join /tmp nsdbsqlite-tests-[pid]]
-file mkdir [file join $home data sqlite nested]
+file mkdir $home
 ns_section ns/parameters {
     ns_param home $home
     ns_param logdir $home

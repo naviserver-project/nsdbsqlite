@@ -3,6 +3,11 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 package require tcltest 2.2
+# Startup must create the standard directories; custom subdirectories are provisioned separately.
+if {![file isdirectory [file join [ns_info home] data sqlite]]} {
+    error "driver did not create the standard SQLite data directory"
+}
+file mkdir [file join [ns_info home] data sqlite nested]
 namespace import ::tcltest::*
 configure {*}$argv
 set h [ns_db gethandle sqlite]

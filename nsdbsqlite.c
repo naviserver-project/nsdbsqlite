@@ -66,7 +66,7 @@ typedef struct {
  * Local functions defined in this file.
  */
 
-static void DbConfigureDatasources(const char *driver);
+static Ns_ReturnCode DbConfigureDatasources(const char *driver);
 static Ns_Set *DbBindRow(Ns_DbHandle *handle);
 static void DbError(Ns_DbHandle *handle, const char *operation);
 static Ns_ReturnCode DbCancel(Ns_DbHandle *handle);
@@ -141,18 +141,21 @@ Ns_DbDriverInit(const char *driver, const char *UNUSED(configPath))
         Ns_Log(Error, "nsdbsqlite: could not register the '%s' driver.", driver);
         return NS_ERROR;
     }
-    DbConfigureDatasources(driver);
+    if (DbConfigureDatasources(driver) != NS_OK) {
+        return NS_ERROR;
+    }
     Ns_Log(Notice, "nsdbsqlite: version %s loaded, based on SQLite %s (headers %s)",
            DRIVER_VERSION, sqlite3_libversion(), SQLITE_VERSION);
     return NS_OK;
 }
 
 /* nsdb loads the driver before copying datasource values into its pools. */
-static void
+static Ns_ReturnCode
 DbConfigureDatasources(const char *driver)
 {
     const Ns_Set *pools = Ns_ConfigGetSection("ns/db/pools");
     size_t i;
+    bool directoryReady = NS_FALSE;
 
     for (i = 0u; pools != NULL && i < Ns_SetSize(pools); i++) {
         const char *section = Ns_ConfigGetPath(NULL, NULL, "db", "pool",
@@ -177,6 +180,27 @@ DbConfigureDatasources(const char *driver)
         }
         Tcl_DStringInit(&path);
         Tcl_DStringInit(&normalized);
+        if (!directoryReady) {
+            struct stat st;
+            int level;
+
+            /* Only provision the standard root, never datasource subdirectories. */
+            for (level = 0; level < 2; level++) {
+                Ns_MakePath(&path, Ns_InfoHomePath(), "data",
+                            level == 0 ? NULL : "sqlite", NS_SENTINEL);
+                if (Ns_RequireDirectory(Tcl_DStringValue(&path)) != NS_OK
+                    || !Ns_Stat(Tcl_DStringValue(&path), &st)
+                    || !S_ISDIR(st.st_mode)) {
+                    Ns_Log(Error, "nsdbsqlite: required data directory '%s' is unavailable",
+                           Tcl_DStringValue(&path));
+                    Tcl_DStringFree(&normalized);
+                    Tcl_DStringFree(&path);
+                    return NS_ERROR;
+                }
+                Tcl_DStringSetLength(&path, 0);
+            }
+            directoryReady = NS_TRUE;
+        }
         Ns_MakePath(&path, Ns_InfoHomePath(), "data", "sqlite", source, NS_SENTINEL);
         Ns_NormalizePath(&normalized, Tcl_DStringValue(&path));
         Ns_SetIUpdate(Ns_ConfigGetSection(section), "datasource",
@@ -184,6 +208,7 @@ DbConfigureDatasources(const char *driver)
         Tcl_DStringFree(&normalized);
         Tcl_DStringFree(&path);
     }
+    return NS_OK;
 }
 
 static int DbInterpInit(Tcl_Interp * interp, const void *UNUSED(arg))
