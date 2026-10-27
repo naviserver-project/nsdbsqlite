@@ -30,14 +30,25 @@ TESTFLAGS ?=
 test: all test-lifecycle
 	$(NSD) -c -d -t $(CURDIR)/tests/test.nscfg $(CURDIR)/tests/all.test $(TESTFLAGS)
 
-# Generate the amalgamation from a pinned release in SQLite's official Git mirror.
-SQLITE_VERSION ?= 3.53.4
+# Generate the amalgamation from the latest release in SQLite's official Git mirror.
+# Set SQLITE_VERSION to select a specific release instead.
+SQLITE_VERSION ?=
+GIT ?= git
 CURL ?= curl
 .PHONY: refresh-sqlite
 refresh-sqlite:
 	@set -eu; \
 	version='$(SQLITE_VERSION)'; \
-	if ! printf '%s\n' "$$version" | LC_ALL=C grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$$'; then \
+	if test -z "$$version"; then \
+	    tags=$$($(GIT) ls-remote --tags --refs https://github.com/sqlite/sqlite.git 'version-*'); \
+	    version=$$(printf '%s\n' "$$tags" | \
+	        sed -n 's|.*refs/tags/version-\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\(\.[0-9][0-9]*\)\{0,1\}\)$$|\1|p' | \
+	        LC_ALL=C sort -t . -k1,1n -k2,2n -k3,3n -k4,4n | tail -n 1); \
+	    if test -z "$$version"; then \
+	        echo 'No SQLite release tags found upstream' >&2; exit 1; \
+	    fi; \
+	fi; \
+	if ! printf '%s\n' "$$version" | LC_ALL=C grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$$'; then \
 	    echo 'SQLITE_VERSION must be a release number such as 3.53.4' >&2; exit 1; \
 	fi; \
 	tmp=$$(mktemp -d ./sqlite-refresh.XXXXXX); \
@@ -71,20 +82,22 @@ help:
 	    '  clean           Remove build artifacts' \
 	    '  test            Run lifecycle and isolated integration tests' \
 	    '  test-lifecycle  Run direct callback/finalization checks' \
-	    '  refresh-sqlite  Download a GitHub release and regenerate sqlite3.c/h' \
+	    '  refresh-sqlite  Download latest release and regenerate sqlite3.c/h' \
 	    '  help            Show this help' \
 	    '' \
 	    'Variables (current values):' \
 	    '  NAVISERVER=$(NAVISERVER)' \
 	    '  NSD=$(NSD)' \
 	    '  TESTFLAGS=$(TESTFLAGS)' \
-	    '  SQLITE_VERSION=$(SQLITE_VERSION)' \
+	    '  SQLITE_VERSION=$(SQLITE_VERSION) (empty selects latest release)' \
+	    '  GIT=$(GIT)' \
 	    '  CURL=$(CURL)' \
 	    '' \
 	    'Examples:' \
 	    '  make NAVISERVER=/opt/ns' \
 	    '  make test TESTFLAGS="-verbose bpse"' \
-	    '  make refresh-sqlite SQLITE_VERSION=$(SQLITE_VERSION)'
+	    '  make refresh-sqlite' \
+	    '  make refresh-sqlite SQLITE_VERSION=3.53.4'
 
 .PHONY: test-lifecycle clean-lifecycle
 test-lifecycle: tests/lifecycle-test$(EXEEXT)
