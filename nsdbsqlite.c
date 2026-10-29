@@ -631,7 +631,11 @@ BatchInsert(Tcl_Interp *interp, Ns_DbHandle *handle, const Ns_DbBatch *batch, Tc
         BatchQuote(&sql, tableName);
         Tcl_DStringAppend(&sql, ")", 1);
         Tcl_UtfToExternalDString(encoding, sql.string, sql.length, &utf);
-        rc = sqlite3_prepare_v2(db, utf.string, utf.length, &stmt, NULL);
+        if (utf.length > INT_MAX) {
+            BatchFail(interp, handle, "MAPPING", -1, NULL, "SQL statement exceeds SQLite length limit");
+            goto finish;
+        }
+        rc = sqlite3_prepare_v2(db, utf.string, (int)utf.length, &stmt, NULL);
         Tcl_DStringFree(&utf);
         Tcl_DStringInit(&utf);
         if (rc != SQLITE_OK) {
@@ -729,8 +733,12 @@ BatchInsert(Tcl_Interp *interp, Ns_DbHandle *handle, const Ns_DbBatch *batch, Tc
     }
     Tcl_DStringAppend(&sql, ")", 1);
     Tcl_UtfToExternalDString(encoding, sql.string, sql.length, &utf);
+    if (utf.length > INT_MAX) {
+        BatchFail(interp, handle, "MAPPING", -1, NULL, "SQL statement exceeds SQLite length limit");
+        goto finish;
+    }
     if ((size_t)utf.length != strlen(utf.string)
-        || sqlite3_prepare_v2(db, utf.string, utf.length, &stmt, NULL) != SQLITE_OK) {
+        || sqlite3_prepare_v2(db, utf.string, (int)utf.length, &stmt, NULL) != SQLITE_OK) {
         BatchFail(interp, handle, "MAPPING", -1, NULL, sqlite3_errmsg(db));
         goto finish;
     }
