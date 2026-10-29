@@ -3,3 +3,4 @@
 *.so
 /tests/lifecycle-test
 /tests/lifecycle-test.exe
+.ns-module-info.h
