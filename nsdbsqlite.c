@@ -1243,7 +1243,10 @@ DbGetRow(Ns_DbHandle *handle, Ns_Set *row)
 
     ((Connection *)handle->connection)->nrows++;
     for (col = 0; col < contextPtr->ncolumns; col++) {
-        Ns_SetPutValue(row, col, (const char *)sqlite3_column_text(contextPtr->stmt, (int)col));
+        const char *value = (const char *)sqlite3_column_text(contextPtr->stmt, (int)col);
+        int         length = sqlite3_column_bytes(contextPtr->stmt, (int)col);
+
+        Ns_SetPutValueSz(row, col, value != NULL ? value : "", (TCL_SIZE_T)length);
     }
 
     return NS_OK;
