@@ -283,3 +283,48 @@ copyright notices.
 * Vlad Seryakov - [vlad@crystalballinc.com](mailto:vlad@crystalballinc.com)
 * Gustaf Neumann
 
+
+
+## Optional native batch ingestion
+
+When compiled with the batch-capable nsdb headers/library, the driver registers
+`ns_db batchinfo` / `ns_db batchinsert` callbacks through a `DbFn_Batch` accessor in its existing SQL driver
+registration table. Older headers still build the ordinary driver without batch support;
+a batch-capable nsdb explicitly rejects batch insertion for such a build.
+
+The sink uses prepared bindings on the caller's checked-out connection and active
+transaction, with checked integer/exact microsecond/UTC timestamp conversion at
+the sink. Values remain lexical in the immutable batch. It validates target
+column affinities to avoid silent numeric coercion and precision loss, quotes
+identifier components, and always finalizes statements. Errors can leave earlier
+rows in the outer transaction: callers must roll back. The sink never commits,
+rolls back, consumes the batch or supplies a SQL/JSON fallback.
+
+Supported scalar mappings include UTF-8 text, int32/int64, exact duration/instant
+microseconds, access-log timestamp text or native UTC microseconds, booleans,
+nulls and explicit hex-to-BLOB decoding. Generic JSON numeric lexemes can be
+stored exactly in TEXT; unsupported refinements and lossy conversions fail.
+Nested values and dictionary/JSON import are not implemented by this stage.
+
+Build against the installed public NaviServer headers and libraries:
+
+```sh
+make NAVISERVER=/usr/local/ns
+```
+
+Batch support requires public `nsdb.h`/`batch.h` headers and a matching nsdb
+library. No private core headers or source-directory include paths are needed.
+
+The separate NaviServer development checkout used for the experiments contains
+`nsdb/BATCH-IMPLEMENTATION.md`, which documents the API, C provider interface and
+reproducible verification. Its
+`tclsh tests/check-batches.tcl --fixture --sanitizers` runner covers the shared
+interface, native SQLite sink, existing driver tests and independent all-row
+fixture verification. No installation or production configuration changes are
+performed by these tests. The driver amalgamation used here is SQLite 3.54.1.
+
+Capability metadata uses ordinary Tcl string objects, without core atom IDs.
+JSON numeric syntax is validated by the public `Ns_DbBatchGetValue` accessor in
+nsdb; the external driver does not call private JSON helpers.
+The sink retains its checked lexical-to-integer, exact microsecond and calendar
+conversion routines. C batch readers return `NS_OK`/`NS_ERROR`.

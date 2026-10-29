@@ -10,13 +10,34 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define CHECK(c) do { if (!(c)) { fprintf(stderr, "failed: %s, line %d\n", #c, __LINE__); exit(1); } } while (0)
+#define CHECK(c)                                                                                   \
+    do {                                                                                           \
+        if (!(c)) {                                                                                \
+            fprintf(stderr, "failed: %s, line %d\n", #c, __LINE__);                                \
+            exit(1);                                                                               \
+        }                                                                                          \
+    } while (0)
 
+/*
+ *----------------------------------------------------------------------
+ *
+ * failedStep --
+ *
+ *      Leave a failed SQLite step pending to exercise cleanup callbacks.
+ *
+ * Results:
+ *      None; aborts if the intended failure cannot be established.
+ *
+ * Side effects:
+ *      Prepares a statement and records its failed SQLite step.
+ *
+ *----------------------------------------------------------------------
+ */
 static void
 failedStep(Ns_DbHandle *handle)
 {
     Context *contextPtr;
-    char sql[] = "SELECT abs(-9223372036854775808)";
+    char     sql[] = "SELECT abs(-9223372036854775808)";
 
     Tcl_DStringSetLength(&handle->dsExceptionMsg, 0);
     handle->cExceptionCode[0] = '\0';
@@ -25,14 +46,31 @@ failedStep(Ns_DbHandle *handle)
     CHECK(sqlite3_step(contextPtr->stmt) == SQLITE_ERROR);
 }
 
+/*
+ *----------------------------------------------------------------------
+ *
+ * main --
+ *
+ *      Verify direct driver lifecycle callbacks and statement finalization.
+ *
+ * Results:
+ *      Zero on success; exits on a failed check.
+ *
+ * Side effects:
+ *      Creates an in-memory database and exercises successful and failed
+ *      cleanup.
+ *
+ *----------------------------------------------------------------------
+ */
+
 int
 main(int argc, char **argv)
 {
     Ns_DbHandle handle = {0};
     Connection *connectionPtr;
-    Context *contextPtr;
-    char replacement[] = "CREATE TABLE must_not_execute (id INTEGER)";
-    char begin[] = "BEGIN";
+    Context    *contextPtr;
+    char        replacement[] = "CREATE TABLE must_not_execute (id INTEGER)";
+    char        begin[] = "BEGIN";
 
     (void)argc;
     Tcl_FindExecutable(argv[0]);
@@ -65,7 +103,8 @@ main(int argc, char **argv)
     failedStep(&handle);
     CHECK(DbExec(&handle, replacement) == NS_ERROR);
     connectionPtr = handle.connection;
-    CHECK(sqlite3_exec(connectionPtr->db, "SELECT * FROM must_not_execute", NULL, NULL, NULL) != SQLITE_OK);
+    CHECK(sqlite3_exec(connectionPtr->db, "SELECT * FROM must_not_execute", NULL, NULL, NULL)
+          != SQLITE_OK);
 
     CHECK(DbExec(&handle, begin) == NS_DML);
     failedStep(&handle);
