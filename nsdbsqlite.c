@@ -231,9 +231,7 @@ BoundTextGet(Tcl_Interp *interp, Tcl_Obj *objPtr)
 }
 
 static Ns_DbBindExecProc DbBindExec;
-#ifdef NS_DB_BIND_TYPED_ABI
 static Ns_DbBindTypedExecProc DbBindTypedExec;
-#endif
 #endif
 
 #ifdef NS_DB_BIND_PARAMETER_ABI
@@ -259,9 +257,7 @@ static Ns_DbProc dbProcs[] = {
     { DbFn_Exec,         (ns_funcptr_t)DbExec },
 #ifdef NS_DB_BIND_ABI
     { DbFn_Bind,         (ns_funcptr_t)DbBindExec },
-#ifdef NS_DB_BIND_TYPED_ABI
     { DbFn_BindTyped,    (ns_funcptr_t)DbBindTypedExec },
-#endif
 #endif
 #ifdef NS_DB_BIND_PARAMETER_ABI
     { DbFn_BindParameter, (ns_funcptr_t)DbBindParameter },
@@ -1366,7 +1362,6 @@ static int
 DbBindExec(Tcl_Interp *interp, Ns_DbHandle *handle, const char *sql,
            TCL_SIZE_T count, Tcl_Obj *const *names, Tcl_Obj *const *values)
 {
-#ifdef NS_DB_BIND_TYPED_ABI
     return DbBindTypedExec(interp, handle, sql, count, names, values, NULL);
 }
 
@@ -1375,7 +1370,6 @@ DbBindTypedExec(Tcl_Interp *interp, Ns_DbHandle *handle, const char *sql,
                 TCL_SIZE_T count, Tcl_Obj *const *names, Tcl_Obj *const *values,
                 const Ns_DbBindValueType *types)
 {
-#endif
     Context *context;
 
     if (DbPrepare(handle, sql) != NS_OK) {return NS_ERROR;}
@@ -1416,7 +1410,6 @@ DbBindTypedExec(Tcl_Interp *interp, Ns_DbHandle *handle, const char *sql,
         }
         if (values[i] == NULL) {
             rc = sqlite3_bind_null(context->stmt, index);
-#ifdef NS_DB_BIND_TYPED_ABI
         } else if (types != NULL && types[i] == NS_DB_BIND_BINARY) {
             TCL_SIZE_T length;
             const unsigned char *bytes = Tcl_GetByteArrayFromObj(values[i], &length);
@@ -1424,7 +1417,6 @@ DbBindTypedExec(Tcl_Interp *interp, Ns_DbHandle *handle, const char *sql,
             /* A non-NULL pointer is required for a zero-length BLOB. */
             rc = sqlite3_bind_blob64(context->stmt, index, length == 0 ? (const void *)"" : bytes,
                                      (sqlite3_uint64)length, SQLITE_TRANSIENT);
-#endif
         } else {
             BoundText *textPtr = BoundTextGet(interp, values[i]);
 

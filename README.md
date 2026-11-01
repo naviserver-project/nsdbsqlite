@@ -370,7 +370,7 @@ each execution; the shape cache is not a connection statement cache.
 
 ### Explicit binary binding
 
-With core `NS_DB_BIND_TYPED_ABI`, this driver registers `DbFn_BindTyped` in
+With core `NS_DB_BIND_ABI`, this driver registers `DbFn_BindTyped` in
 addition to the unchanged text callback. Core binding syntax version 5 adds
 `-bindtypes {key binary}` and `-bindtypes {values {rows {binary scalar scalar}}}`.
 SQLite uses `sqlite3_bind_blob64()` with the exact Tcl bytearray bytes and
