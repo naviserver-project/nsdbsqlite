@@ -165,7 +165,14 @@ BoundTextDup(Tcl_Obj *srcPtr, Tcl_Obj *dstPtr)
 }
 
 static CONST86 Tcl_ObjType boundTextType = {
-    "nsdbsqlite:bound-text", BoundTextFree, BoundTextDup, NULL, NULL
+    "nsdbsqlite:bound-text",
+    BoundTextFree,
+    BoundTextDup,
+    NULL,
+    NULL
+#ifdef TCL_OBJTYPE_V0
+   ,TCL_OBJTYPE_V0
+#endif
 };
 
 static BoundText *
@@ -1425,8 +1432,9 @@ DbBindTypedExec(Tcl_Interp *interp, Ns_DbHandle *handle, const char *sql,
                 DbCancel(handle);
                 return NS_ERROR;
             }
-            rc = sqlite3_bind_text(context->stmt, index, textPtr->bytes.string,
-                                  textPtr->bytes.length, SQLITE_TRANSIENT);
+            rc = sqlite3_bind_text64(context->stmt, index, textPtr->bytes.string,
+                                    (sqlite3_uint64)textPtr->bytes.length,
+                                    SQLITE_TRANSIENT, SQLITE_UTF8);
             BoundTextRelease(textPtr);
         }
         if (rc != SQLITE_OK) {
