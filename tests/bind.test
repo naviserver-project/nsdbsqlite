@@ -1,0 +1,224 @@
+# Optional native binding shares the core parser and ordinary result lifecycle.
+set nativeBindings [expr {![catch {ns_db bindinfo $h -version} supported] && $supported>=2}]
+testConstraint nativeBindings $nativeBindings
+proc sqliteBindRow {handle sql args} {
+    if {"-binddict" ni $args && "-bindset" ni $args} {set args [linsert $args 0 -bindvars]}
+    set kind [uplevel 1 [list ns_db exec $handle {*}$args -- $sql]]
+    if {$kind ne "NS_ROWS"} {return $kind}
+    set row [ns_db bindrow $handle]
+    try {
+        if {![ns_db getrow $handle $row]} {return {}}
+        return [ns_set array $row]
+    } finally {ns_db flush $handle; ns_set free $row}
+}
+test sqlite-bind-1 {native binds preserve text and do not interpolate SQL} -constraints nativeBindings -body {
+    set value {quote'; DROP TABLE items; café $literal [command]}
+    set row [sqliteBindRow $h {SELECT :value AS v,typeof(:value) AS t}]
+    list [expr {[dict get $row v] eq $value}] [dict get $row t]
+} -result {1 text}
+test sqlite-bind-2 {empty string remains text unless emptynull is explicit} -constraints nativeBindings -body {
+    set empty {}
+    set missingBind {}
+    sqliteBindRow $h {SELECT typeof(:empty) AS e,:missingBind IS NULL AS n} -emptynull
+} -result {e null n 1}
+test sqlite-bind-3 {repeated bind names share a parameter slot} -constraints nativeBindings -body {
+    sqliteBindRow $h {SELECT :v AS a,:v AS b} -binddict {v same}
+} -result {a same b same}
+test sqlite-bind-4 {failed native binding does not poison later ordinary execution} -constraints nativeBindings -body {
+    set value "a\x00b"
+    set failed [catch {sqliteBindRow $h {SELECT :value}}]
+    list $failed [sqliteBindRow $h {SELECT 1 AS n}]
+} -result {1 {n 1}}
+test sqlite-bind-5 {unplanned parameters are rejected instead of becoming NULL} -constraints nativeBindings -body {
+    catch {sqliteBindRow $h {SELECT ?}} message
+    string match {*unrecognized or positional*} $message
+} -result 1
+test sqlite-bind-6 {native parameter conversion preserves caller-owned rollback} -constraints nativeBindings -body {
+    ns_db dml $h {CREATE TEMP TABLE native_bind_test(v TEXT UNIQUE)}
+    ns_db dml $h BEGIN
+    set value one
+    sqliteBindRow $h {INSERT INTO native_bind_test VALUES(:value)}
+    set failed [catch {sqliteBindRow $h {INSERT INTO native_bind_test VALUES(:value)}}]
+    ns_db dml $h ROLLBACK
+    list $failed [sqliteBindRow $h {SELECT count(*) AS n FROM native_bind_test}]
+} -result {1 {n 0}}
+set nativeBindTypes [expr {![catch {ns_db bindinfo $h -version} typedVersion] && $typedVersion>=3}]
+testConstraint nativeBindTypes $nativeBindTypes
+test sqlite-bind-types-1 {scalar and list values use verified native parameter slots} -constraints nativeBindTypes -body {
+    sqliteBindRow $h {SELECT :target IN(:ids) AS n} -binddict {target 2 ids {1 2 3}} -bindtypes {ids list}
+} -result {n 1}
+test sqlite-bind-types-2 {repeated names and changed arities reuse values correctly} -constraints nativeBindTypes -body {
+    set sql {SELECT :target IN(:ids) OR :target IN(:ids) AS n}
+    list [sqliteBindRow $h $sql -binddict {target 1 ids {1 2}} -bindtypes {ids list}] \
+        [sqliteBindRow $h $sql -binddict {target 3 ids {3}} -bindtypes {ids list}]
+} -result {{n 1} {n 1}}
+
+set nativeBinaryBindings [expr {![catch {ns_db bindinfo $h -version} version] && $version>=5}]
+testConstraint nativeBinaryBindings $nativeBinaryBindings
+test sqlite-bind-binary-1 {explicit binary uses BLOB and leaves scalar bytearrays as text} -constraints nativeBinaryBindings -body {
+    set data [binary decode hex 80ff]
+    list [sqliteBindRow $h {SELECT typeof(:data) AS t,hex(:data) AS h} -bindtypes {data binary}] \
+        [sqliteBindRow $h {SELECT typeof(:data) AS t,hex(:data) AS h}]
+} -result {{t blob h 80FF} {t text h C280C3BF}}
+test sqlite-bind-binary-2 {embedded NUL and empty binary values are preserved} -constraints nativeBinaryBindings -body {
+    set data [binary decode hex 000180ff]
+    set empty [binary format a0 {}]
+    list [sqliteBindRow $h {SELECT hex(:data) AS h,typeof(:empty) AS t,length(:empty) AS n} -bindtypes {data binary empty binary}] \
+        [sqliteBindRow $h {SELECT :empty IS NULL AS n} -bindtypes {empty binary} -emptynull]
+} -result {{h 000180FF t blob n 0} {n 1}}
+test sqlite-bind-binary-rows {row column metadata binds binary keys directly} -constraints nativeBinaryBindings -body {
+    set rows [list [list [binary decode hex 00ff] café]]
+    sqliteBindRow $h {SELECT hex(column1) AS h,typeof(column1) AS t,column2 AS v FROM (VALUES :rows)} \
+        -bindtypes {rows {rows {binary scalar}}}
+} -result {h 00FF t blob v café}
+
+test sqlite-bind-encoded-sql {cached SQL observes system-encoding changes and fresh scalar values} -constraints nativeBindings -body {
+    set saved [encoding system]
+    set sql {SELECT hex('é') AS h,:value AS v}
+    set result {}
+    try {
+        foreach {enc value} {utf-8 first iso8859-1 second utf-8 third} {
+            encoding system $enc
+            lappend result [sqliteBindRow $h $sql]
+        }
+    } finally {encoding system $saved}
+    set result
+} -result {{h C3A9 v first} {h E9 v second} {h C3A9 v third}}
+
+test sqlite-bind-value-cache-reuse {cached values retain content through repeated binding and mutation} -constraints nativeBindings -body {
+    set value [string repeat {café 雪 ' \ } 20]
+    set alias $value
+    set sql {SELECT :value AS v}
+    set result {}
+    foreach i {1 2 3} {
+        lappend result [expr {[dict get [sqliteBindRow $h $sql] v] eq $value}]
+    }
+    append value changed
+    lappend result [expr {[dict get [sqliteBindRow $h $sql] v] eq $value}]
+    set value $alias
+    lappend result [expr {[dict get [sqliteBindRow $h $sql] v] eq $alias}]
+    set result
+} -result {1 1 1 1 1}
+
+test sqlite-bind-value-cache-representations {integer and list operations invalidate cached bytes} -constraints nativeBindings -body {
+    set value 123
+    set first [sqliteBindRow $h {SELECT :value AS v}]
+    incr value
+    set second [sqliteBindRow $h {SELECT :value AS v}]
+    set value [list {one two} café]
+    set before [sqliteBindRow $h {SELECT :value AS v}]
+    set selected [lindex $value 1]
+    set same [sqliteBindRow $h {SELECT :value AS v}]
+    lappend value third
+    set after [sqliteBindRow $h {SELECT :value AS v}]
+    list $first $second $selected [expr {$before eq $same}] \
+        [expr {[dict get $after v] eq $value}]
+} -result {{v 123} {v 124} café 1 1}
+
+test sqlite-bind-value-cache-encoding {same value observes encoding changes; failed conversion preserves prior cache} -constraints nativeBindings -body {
+    set saved [encoding system]
+    set value é
+    set sql {SELECT hex(:value) AS h}
+    set result {}
+    try {
+        foreach enc {utf-8 iso8859-1 utf-8} {
+            encoding system $enc
+            lappend result [sqliteBindRow $h $sql]
+        }
+        # An ASCII statement survives this encoding; its non-ASCII value
+        # becomes a NUL byte and must fail before SQLite can consume it.
+        encoding system ascii
+        set value "\u0000"
+        lappend result [catch {sqliteBindRow $h $sql} message]
+        lappend result [string match {*bind value contains NUL character*} $message]
+        encoding system utf-8
+        set value é
+        lappend result [sqliteBindRow $h $sql]
+    } finally {
+        encoding system $saved
+    }
+    set result
+} -result {{h C3A9} {h E9} {h C3A9} 1 1 {h C3A9}}
+
+test sqlite-bind-value-cache-nul {a rejected value remains rejected on retry and leaves the handle usable} -constraints nativeBindings -body {
+    set value "a\u0000b"
+    set errors {}
+    foreach i {1 2} {
+        lappend errors [catch {sqliteBindRow $h {SELECT :value AS v}} message] \
+            [string match {*bind value contains NUL character*} $message]
+    }
+    set value good
+    list $errors [sqliteBindRow $h {SELECT :value AS v}]
+} -result {{1 1 1 1} {v good}}
+
+test sqlite-bind-value-cache-empty {empty text and explicit NULL retain semantics after cache use} -constraints nativeBindings -body {
+    set value {}
+    list [sqliteBindRow $h {SELECT typeof(:value) AS t,length(:value) AS n}] \
+        [sqliteBindRow $h {SELECT :value IS NULL AS n} -emptynull] \
+        [sqliteBindRow $h {SELECT typeof(:value) AS t,length(:value) AS n}]
+} -result {{t text n 0} {n 1} {t text n 0}}
+
+test sqlite-bind-value-cache-binary {switching bytearrays between text and binary does not change their contents} -constraints nativeBinaryBindings -body {
+    set data [binary decode hex 80ff00]
+    set failed [catch {sqliteBindRow $h {SELECT :data AS v}}]
+    set first [sqliteBindRow $h {SELECT hex(:data) AS h} -bindtypes {data binary}]
+    set data [binary decode hex 80ff]
+    set result {}
+    foreach types {{} {data binary} {} {data binary}} {
+        lappend result [sqliteBindRow $h {SELECT typeof(:data) AS t,hex(:data) AS h} -bindtypes $types]
+    }
+    list $failed $first $result
+} -result {1 {h 80FF00} {{t text h C280C3BF} {t blob h 80FF} {t text h C280C3BF} {t blob h 80FF}}}
+
+test sqlite-bind-value-cache-collections {expanded rows/lists retain cache invalidation and binary column semantics} -constraints nativeBinaryBindings -body {
+    set item café
+    set rows [list [list $item [binary decode hex 00ff]]]
+    set first [sqliteBindRow $h {SELECT column1 AS v,hex(column2) AS h FROM (VALUES :rows)} \
+                   -bindtypes {rows {rows {scalar binary}}}]
+    set item changed
+    lset rows 0 0 $item
+    set second [sqliteBindRow $h {SELECT column1 AS v,hex(column2) AS h FROM (VALUES :rows)} \
+                    -bindtypes {rows {rows {scalar binary}}}]
+    list $first $second
+} -result {{v café h 00FF} {v changed h 00FF}}
+
+
+test sqlite-bind-value-cache-sql-alias {a value sharing the SQL object does not invalidate the active plan} -constraints nativeBindings -body {
+    set sql {SELECT :sql AS v}
+    set result {}
+    foreach i {1 2 3} {
+        lappend result [expr {[dict get [sqliteBindRow $h $sql] v] eq $sql}]
+    }
+    set result
+} -result {1 1 1}
+
+test sqlite-bind-value-cache-null-collections {emptynull remains correct with repeated and changed collection cells} -constraints nativeBindTypes -body {
+    set rows [list [list café {}]]
+    set result {}
+    foreach i {1 2} {
+        lappend result [sqliteBindRow $h {SELECT column1 AS v,column2 IS NULL AS n FROM (VALUES :rows)} \
+                            -bindtypes {rows rows} -emptynull]
+    }
+    lset rows 0 1 filled
+    lappend result [sqliteBindRow $h {SELECT column1 AS v,column2 IS NULL AS n FROM (VALUES :rows)} \
+                        -bindtypes {rows rows} -emptynull]
+    set ids [list {} café]
+    lappend result [sqliteBindRow $h {SELECT count(*) AS n FROM (SELECT 1 WHERE 'café' IN(:ids))} \
+                        -bindtypes {ids list} -emptynull]
+    set result
+} -result {{v café n 1} {v café n 1} {v café n 0} {n 1}}
+
+
+test sqlite-bind-value-cache-nan {binding text does not discard a double NaN payload} -constraints nativeBindings -body {
+    binary scan [binary decode hex 420000000000f87f] q value
+    set expected [format %s $value]
+    set result {}
+    foreach options {{} {-emptynull}} {
+        set row [sqliteBindRow $h {SELECT :value AS v} {*}$options]
+        lappend result [expr {[dict get $row v] eq $expected}] \
+            [binary encode hex [binary format q $value]]
+    }
+    set result
+} -result {1 420000000000f87f 1 420000000000f87f}
+
+rename sqliteBindRow {}

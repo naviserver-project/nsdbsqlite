@@ -517,6 +517,8 @@ test sqlite-9.8 {URI spelling is preserved without changing URI support} -body {
     ns_config ns/db/pool/uri datasource
 } -result {file:uri-test.db?mode=memory}
 
+source [file join [file dirname [info script]] bind.test]
+
 ns_db releasehandle $h
 set failed $::tcltest::numTests(Failed)
 cleanupTests

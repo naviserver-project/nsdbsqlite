@@ -23,6 +23,7 @@
 #include "nsdb.h"
 #include "sqlite3.h"
 #include <limits.h>
+#include <math.h>
 
 #define DRIVER_VERSION "0.9"
 
@@ -121,6 +122,122 @@ static const Ns_DbBatchDriverOps batchOps = {NS_DB_BATCH_ABI,     sizeof(Ns_DbBa
                                              BatchInsert};
 #endif
 
+#ifdef NS_DB_BIND_ABI
+/*
+ * Keep one external text encoding in the value's Tcl_Obj.
+ * Its string representation remains authoritative. Tcl operations which replace
+ * the internal representation discard this cache; duplicates share its bytes.
+ * Callers hold a reference until SQLite has copied the bytes. Foreign object
+ * types keep their internal representation and use temporary external bytes.
+ * Explicit binary bindings never enter this path.
+ */
+typedef struct BoundText {
+    unsigned      refs;
+    Tcl_Encoding  encoding;
+    Tcl_DString   bytes;
+} BoundText;
+
+static void
+BoundTextRelease(BoundText *textPtr)
+{
+    if (--textPtr->refs == 0u) {
+        Tcl_DStringFree(&textPtr->bytes);
+        Tcl_FreeEncoding(textPtr->encoding);
+        ns_free(textPtr);
+    }
+}
+
+static void
+BoundTextFree(Tcl_Obj *objPtr)
+{
+    BoundTextRelease(objPtr->internalRep.twoPtrValue.ptr1);
+}
+
+static void
+BoundTextDup(Tcl_Obj *srcPtr, Tcl_Obj *dstPtr)
+{
+    BoundText *textPtr = srcPtr->internalRep.twoPtrValue.ptr1;
+
+    textPtr->refs++;
+    dstPtr->internalRep.twoPtrValue.ptr1 = textPtr;
+    dstPtr->internalRep.twoPtrValue.ptr2 = NULL;
+    dstPtr->typePtr = srcPtr->typePtr;
+}
+
+static CONST86 Tcl_ObjType boundTextType = {
+    "nsdbsqlite:bound-text", BoundTextFree, BoundTextDup, NULL, NULL
+};
+
+static BoundText *
+BoundTextGet(Tcl_Interp *interp, Tcl_Obj *objPtr)
+{
+    Tcl_Encoding  encoding = Tcl_GetEncoding(interp, NULL);
+    BoundText    *textPtr;
+    TCL_SIZE_T    length;
+    const char   *value;
+
+    if (encoding == NULL) {
+        return NULL;
+    }
+    if (objPtr->typePtr == &boundTextType) {
+        textPtr = objPtr->internalRep.twoPtrValue.ptr1;
+        if (textPtr->encoding == encoding) {
+            Tcl_FreeEncoding(encoding);
+            textPtr->refs++;
+            return textPtr;
+        }
+    }
+
+    /*
+     * Convert and validate before replacing the old representation. Failed
+     * conversion leaves the original value and any previous cache intact.
+     */
+    value = Tcl_GetStringFromObj(objPtr, &length);
+    textPtr = ns_calloc(1u, sizeof(BoundText));
+    textPtr->refs = 1u;
+    textPtr->encoding = encoding;
+    Tcl_UtfToExternalDString(encoding, value, length, &textPtr->bytes);
+    if (strlen(textPtr->bytes.string) != (size_t)textPtr->bytes.length) {
+        BoundTextRelease(textPtr);
+        Tcl_SetObjResult(interp, Tcl_NewStringObj("bind value contains NUL character", -1));
+        return NULL;
+    }
+
+    /*
+     * Cache only ordinary strings. Other types can carry state which their
+     * string cannot reconstruct: opaque objects, list/dictionary elements,
+     * or even a double's NaN payload. Keep those representations intact and
+     * return temporary bytes instead of replacing them with this cache.
+     */
+    if (objPtr->typePtr != NULL && objPtr->typePtr != &boundTextType
+        && objPtr->typePtr != Tcl_GetObjType("string")) {
+        return textPtr;
+    }
+    if (objPtr->typePtr != NULL && objPtr->typePtr->freeIntRepProc != NULL) {
+        objPtr->typePtr->freeIntRepProc(objPtr);
+    }
+    objPtr->internalRep.twoPtrValue.ptr1 = textPtr;
+    objPtr->internalRep.twoPtrValue.ptr2 = NULL;
+    objPtr->typePtr = &boundTextType;
+    textPtr->refs++;
+    return textPtr;
+}
+
+static Ns_DbBindExecProc DbBindExec;
+#ifdef NS_DB_BIND_TYPED_ABI
+static Ns_DbBindTypedExecProc DbBindTypedExec;
+#endif
+#endif
+
+#ifdef NS_DB_BIND_PARAMETER_ABI
+/* Numbered markers avoid SQLite's name searches while preparing large lists. */
+static Tcl_Obj *
+DbBindParameter(TCL_SIZE_T position)
+{
+    return Tcl_ObjPrintf("?%" TCL_LL_MODIFIER "d", (Tcl_WideInt)position + 1);
+}
+#endif
+
 static Ns_DbProc dbProcs[] = {
     { DbFn_ServerInit,   (ns_funcptr_t)DbServerInit },
     { DbFn_Name,         (ns_funcptr_t)DbName },
@@ -133,6 +250,15 @@ static Ns_DbProc dbProcs[] = {
     { DbFn_Cancel,       (ns_funcptr_t)DbCancel },
     { DbFn_ResetHandle,  (ns_funcptr_t)DbResetHandle },
     { DbFn_Exec,         (ns_funcptr_t)DbExec },
+#ifdef NS_DB_BIND_ABI
+    { DbFn_Bind,         (ns_funcptr_t)DbBindExec },
+#ifdef NS_DB_BIND_TYPED_ABI
+    { DbFn_BindTyped,    (ns_funcptr_t)DbBindTypedExec },
+#endif
+#endif
+#ifdef NS_DB_BIND_PARAMETER_ABI
+    { DbFn_BindParameter, (ns_funcptr_t)DbBindParameter },
+#endif
     { DbFn_BindRow,      (ns_funcptr_t)DbBindRow },
     { DbFn_SpStart,      (ns_funcptr_t)DbSpStart },
     { DbFn_SpExec,       (ns_funcptr_t)DbSpExec },
@@ -175,6 +301,12 @@ BatchSupports(const Ns_DbBatchColumn *c)
         return r == NULL && p == NULL;
     }
     if (strcmp(c->type, "string") == 0) {
+        if (r != NULL && strcmp(r, "int64_or_empty_text") == 0) {
+            return p != NULL && strcmp(p, "integer_decimal") == 0;
+        }
+        if (r != NULL && strcmp(r, "hex_or_empty_text") == 0) {
+            return p != NULL && strcmp(p, "hex") == 0;
+        }
         if (r != NULL && strcmp(r, "encoded_binary") == 0) {
             return p != NULL && strcmp(p, "hex") == 0;
         }
@@ -190,6 +322,9 @@ BatchSupports(const Ns_DbBatchColumn *c)
     }
     if (r == NULL) {
         return p == NULL || strcmp(p, "integer_decimal") == 0;
+    }
+    if (strcmp(r, "float64") == 0) {
+        return p != NULL && strcmp(p, "decimal") == 0;
     }
     if (strcmp(r, "int32") == 0 || strcmp(r, "int64") == 0) {
         return p == NULL || strcmp(p, "integer_decimal") == 0;
@@ -228,7 +363,7 @@ BatchCapabilities(void)
                          NEW_LITERAL_OBJ("string number boolean null"));
     (void)Tcl_DictObjPut(NULL, d,
                          NEW_LITERAL_OBJ("refinements"),
-                         NEW_LITERAL_OBJ("int32 int64 duration_us datetime_us accesslog_time encoded_binary"));
+                         NEW_LITERAL_OBJ("int32 int64 float64 duration_us datetime_us accesslog_time encoded_binary int64_or_empty_text hex_or_empty_text"));
     (void)Tcl_DictObjPut(NULL, d,
                          NEW_LITERAL_OBJ("representations"),
                          NEW_LITERAL_OBJ("compact-schema-lexical"));
@@ -696,7 +831,13 @@ BatchInsert(Tcl_Interp *interp, Ns_DbHandle *handle, const Ns_DbBatch *batch, Tc
         bool nativeTime = field->refinement != NULL
                           && strcmp(field->refinement, "accesslog_time") == 0
                           && (affinity[c] == B_AFF_INTEGER || affinity[c] == B_AFF_NUMERIC);
-        bool text = strcmp(field->type, "string") == 0 && !binary && !nativeTime;
+        bool real = field->refinement != NULL && strcmp(field->refinement, "float64") == 0;
+        bool integerOrEmpty = field->refinement != NULL
+                              && strcmp(field->refinement, "int64_or_empty_text") == 0;
+        bool hexOrEmpty = field->refinement != NULL
+                          && strcmp(field->refinement, "hex_or_empty_text") == 0;
+        bool text = strcmp(field->type, "string") == 0 && !binary && !nativeTime
+                    && !integerOrEmpty && !hexOrEmpty;
         bool lexicalNumber = strcmp(field->type, "number") == 0 && field->refinement == NULL
                              && affinity[c] == B_AFF_TEXT;
 
@@ -706,9 +847,12 @@ BatchInsert(Tcl_Interp *interp, Ns_DbHandle *handle, const Ns_DbBatch *batch, Tc
             goto finish;
         }
         if (strcmp(field->type, "null") != 0 && !lexicalNumber
-            && ((binary && affinity[c] != B_AFF_BLOB)
+            && ((integerOrEmpty && affinity[c] != B_AFF_INTEGER && affinity[c] != B_AFF_BLOB)
+                || (hexOrEmpty && affinity[c] != B_AFF_TEXT && affinity[c] != B_AFF_BLOB)
+                || (binary && affinity[c] != B_AFF_BLOB && affinity[c] != B_AFF_TEXT)
+                || (real && affinity[c] != B_AFF_REAL && affinity[c] != B_AFF_BLOB)
                 || (text && affinity[c] != B_AFF_TEXT && affinity[c] != B_AFF_BLOB)
-                || (!text && !binary
+                || (!text && !binary && !real && !integerOrEmpty && !hexOrEmpty
                     && (affinity[c] == B_AFF_REAL || affinity[c] == B_AFF_TEXT)))) {
             BatchFail(interp, handle, "TYPE_MISMATCH", -1, map[c].destination,
                       "target affinity can coerce or lose the requested type/precision");
@@ -760,8 +904,23 @@ BatchInsert(Tcl_Interp *interp, Ns_DbHandle *handle, const Ns_DbBatch *batch, Tc
             }
             if (v.isNull) {
                 rc = sqlite3_bind_null(stmt, (int)c + 1);
+            } else if (field->refinement != NULL
+                       && (strcmp(field->refinement, "int64_or_empty_text") == 0
+                           || strcmp(field->refinement, "hex_or_empty_text") == 0)
+                       && v.length == 0u) {
+                /* Explicit union refinements preserve legacy empty TEXT. */
+                rc = sqlite3_bind_text(stmt, (int)c + 1, "", 0, SQLITE_STATIC);
+            } else if (field->refinement != NULL
+                       && strcmp(field->refinement, "int64_or_empty_text") == 0) {
+                if (!BatchInteger(v.bytes, v.length, false, &integer)) {
+                    BatchFail(interp, handle, "CONVERSION", current, column,
+                              "invalid or out-of-range int64 value");
+                    goto finish;
+                }
+                rc = sqlite3_bind_int64(stmt, (int)c + 1, integer);
             } else if (strcmp(field->type, "string") == 0 && field->refinement != NULL
-                       && strcmp(field->refinement, "encoded_binary") == 0) {
+                       && (strcmp(field->refinement, "encoded_binary") == 0
+                           || strcmp(field->refinement, "hex_or_empty_text") == 0)) {
                 size_t         n = v.length / 2u;
                 unsigned char *blob = ns_malloc(n == 0u ? 1u : n);
 
@@ -791,6 +950,20 @@ BatchInsert(Tcl_Interp *interp, Ns_DbHandle *handle, const Ns_DbBatch *batch, Tc
                     goto finish;
                 }
                 rc = sqlite3_bind_int64(stmt, (int)c + 1, integer);
+            } else if (field->refinement != NULL && strcmp(field->refinement, "float64") == 0) {
+                Tcl_Obj *value = Tcl_NewStringObj((const char *)v.bytes, (TCL_SIZE_T)v.length);
+                double real;
+                int status;
+
+                Tcl_IncrRefCount(value);
+                status = Tcl_GetDoubleFromObj(interp, value, &real);
+                Tcl_DecrRefCount(value);
+                if (status != TCL_OK || !isfinite(real)) {
+                    BatchFail(interp, handle, "CONVERSION", current, column,
+                              "invalid or non-finite float64 value");
+                    goto finish;
+                }
+                rc = sqlite3_bind_double(stmt, (int)c + 1, real);
             } else if (strcmp(field->type, "string") == 0
                        || (strcmp(field->type, "number") == 0 && field->refinement == NULL
                            && affinity[c] == B_AFF_TEXT)) {
@@ -1178,6 +1351,93 @@ DbExec(Ns_DbHandle *handle, char *sql)
     }
     return DbExecutePrepared(handle);
 }
+
+#ifdef NS_DB_BIND_ABI
+/* Resolve parameters by name in the prepared statement. Repeated names share
+ * one SQLite binding; no value is ever concatenated into SQL text. */
+static int
+DbBindExec(Tcl_Interp *interp, Ns_DbHandle *handle, const char *sql,
+           TCL_SIZE_T count, Tcl_Obj *const *names, Tcl_Obj *const *values)
+{
+#ifdef NS_DB_BIND_TYPED_ABI
+    return DbBindTypedExec(interp, handle, sql, count, names, values, NULL);
+}
+
+static int
+DbBindTypedExec(Tcl_Interp *interp, Ns_DbHandle *handle, const char *sql,
+                TCL_SIZE_T count, Tcl_Obj *const *names, Tcl_Obj *const *values,
+                const Ns_DbBindValueType *types)
+{
+#endif
+    Context *context;
+
+    if (DbPrepare(handle, sql) != NS_OK) {return NS_ERROR;}
+    context = handle->statement;
+    if (sqlite3_bind_parameter_count(context->stmt) != count) {
+        Tcl_SetObjResult(interp, Tcl_NewStringObj("unrecognized or positional SQL parameter", -1));
+        DbCancel(handle);
+        return NS_ERROR;
+    }
+    for (TCL_SIZE_T i = 0; i < count; i++) {
+        const char *name = Tcl_GetString(names[i]);
+        int index = 0, rc;
+
+        if (name[0] == '?' && name[1] >= '1' && name[1] <= '9') {
+            const char *p;
+
+            /* Numbered markers identify slots directly. Asking SQLite for a
+             * slot's name would itself search its internal name list. */
+            for (p = name + 1; *p >= '0' && *p <= '9'; p++) {
+                int digit = *p - '0';
+
+                if (index > (INT_MAX - digit) / 10) {break;}
+                index = index * 10 + digit;
+            }
+            if (*p != '\0' || index > count) {index = 0;}
+        } else {
+            const char *slotName = sqlite3_bind_parameter_name(context->stmt, (int)i + 1);
+
+            /* Named callers retain verified first-occurrence and lookup paths. */
+            index = slotName != NULL && strcmp(slotName, name) == 0
+                    ? (int)i + 1 : sqlite3_bind_parameter_index(context->stmt, name);
+        }
+
+        if (index == 0) {
+            Tcl_SetObjResult(interp, Tcl_NewStringObj("SQL parameter does not match bind plan", -1));
+            DbCancel(handle);
+            return NS_ERROR;
+        }
+        if (values[i] == NULL) {
+            rc = sqlite3_bind_null(context->stmt, index);
+#ifdef NS_DB_BIND_TYPED_ABI
+        } else if (types != NULL && types[i] == NS_DB_BIND_BINARY) {
+            TCL_SIZE_T length;
+            const unsigned char *bytes = Tcl_GetByteArrayFromObj(values[i], &length);
+
+            /* A non-NULL pointer is required for a zero-length BLOB. */
+            rc = sqlite3_bind_blob64(context->stmt, index, length == 0 ? (const void *)"" : bytes,
+                                     (sqlite3_uint64)length, SQLITE_TRANSIENT);
+#endif
+        } else {
+            BoundText *textPtr = BoundTextGet(interp, values[i]);
+
+            if (textPtr == NULL) {
+                DbCancel(handle);
+                return NS_ERROR;
+            }
+            rc = sqlite3_bind_text(context->stmt, index, textPtr->bytes.string,
+                                  textPtr->bytes.length, SQLITE_TRANSIENT);
+            BoundTextRelease(textPtr);
+        }
+        if (rc != SQLITE_OK) {
+            DbError(handle, "binding SQL value");
+            DbCancel(handle);
+            return NS_ERROR;
+        }
+    }
+    return DbExecutePrepared(handle);
+}
+#endif
 
 static Ns_Set *
 DbBindRow(Ns_DbHandle *handle)

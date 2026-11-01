@@ -328,3 +328,64 @@ JSON numeric syntax is validated by the public `Ns_DbBatchGetValue` accessor in
 nsdb; the external driver does not call private JSON helpers.
 The sink retains its checked lexical-to-integer, exact microsecond and calendar
 conversion routines. C batch readers return `NS_OK`/`NS_ERROR`.
+
+## Native bind variables
+
+With core `NS_DB_BIND_ABI`, this driver supports the shared bind-variable
+interface. Use `ns_db bindinfo $handle -version` to check the core Tcl binding
+API: version 2 introduced the source options below, version 3 added lists,
+version 4 added rows, and version 5 added explicit binary values and row column
+types. The current core reports version 5 when this driver is registered.
+Use `-bindvars`, `-bindset $set` or `-binddict $dict` on the existing `ns_db`
+`exec`, `dml`, `select`, `1row` and `0or1row` commands. Exactly one source is
+allowed. Missing names are errors; explicit sources never fall back to variables.
+
+The core transparently caches `:name` metadata in SQL Tcl objects. Values reach
+SQLite through `sqlite3_bind_text` or `sqlite3_bind_null`, never SQL concatenation.
+Empty text is preserved unless `-emptynull` explicitly maps it to SQL NULL.
+Numeric Tcl objects retain quoted-text semantics and normal column affinity.
+NUL SQL/text and unplanned/positional parameters are rejected.
+
+Ordinary calls without binding options, result fetching and caller-owned
+transactions are unchanged. Cached parameter metadata does not add a SQLite
+prepared-statement cache. Older core headers omit this optional callback.
+There are no public `bindplan` or `bindexec` commands. See core `ns_db` docs
+for return shapes, option placement, quoting rules and cardinality checks.
+
+### Bind type metadata
+
+`-bindtypes {ids list}` expands `IN (:ids)` into native parameters while other
+parameters default to `scalar`. The option works with variables, sets and
+dictionaries. Empty or malformed lists are errors; `-emptynull` maps empty
+elements to NULL but does not accept empty containers. List values are never
+inserted as SQL text. Use the conventional colon notation for parameter names.
+Core Tcl binding API version 3 identifies list support.
+
+The core caches token positions and one expanded SQL shape per SQL object.
+SQLite supplies numbered markers through the optional core driver hook and
+binds them directly by index. Named C API callers retain verified slot/name
+lookup paths. This avoids preparation and binding name searches for expanded
+lists. SQLite still prepares SQL for
+each execution; the shape cache is not a connection statement cache.
+
+### Explicit binary binding
+
+With core `NS_DB_BIND_TYPED_ABI`, this driver registers `DbFn_BindTyped` in
+addition to the unchanged text callback. Core binding syntax version 5 adds
+`-bindtypes {key binary}` and `-bindtypes {values {rows {binary scalar scalar}}}`.
+SQLite uses `sqlite3_bind_blob64()` with the exact Tcl bytearray bytes and
+`SQLITE_TRANSIENT`. Embedded NUL and all high bytes are preserved. Empty binary
+is a zero-length BLOB; `-emptynull` explicitly maps it to NULL. Plain scalar
+binding continues to use text, regardless of the Tcl internal representation.
+No hex/base64 conversion or guessing based on object type occurs.
+
+### Bound text encoding cache
+
+Ordinary string values cache their externally encoded bytes in their Tcl object.
+Repeated binding reuses these bytes while the value and system encoding remain
+unchanged. Mutation or representation changes invalidate the cache; duplicates
+share its reference-counted storage. SQLite copies the bytes before the call
+returns. Numeric, list, dictionary, bytearray and other foreign representations
+are preserved and use temporary encoded text; explicit binary values bypass
+this text cache. Text containing NUL remains an error. SQL and parameter-value
+caches do not create a connection-level prepared-statement cache.
