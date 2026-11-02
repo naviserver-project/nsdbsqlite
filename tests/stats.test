@@ -1,0 +1,108 @@
+# Statistics must not execute SQL, reset counters or consume pending rows.
+test sqlite-stats-counters {connection snapshots retain cumulative counters} -body {
+    set before [ns_sqlite stats $h]
+    ns_db dml $h {CREATE TEMP TABLE stats_items(id INTEGER PRIMARY KEY,v TEXT)}
+    ns_db dml $h {INSERT INTO stats_items VALUES(1,'one'),(2,'two')}
+    set row [ns_db 1row $h {SELECT sum(id) AS n FROM stats_items}]
+    set after [ns_sqlite stats $h]
+    set again [ns_sqlite stats $h]
+    set valid true
+    foreach {name counter} [dict get $after connection] {
+        if {![dict get $counter available]
+            || ![string is wideinteger -strict [dict get $counter current]]
+            || ![string is wideinteger -strict [dict get $counter highwater]]} {
+            set valid false
+        }
+    }
+    list $valid \
+        [expr {[dict get $after connection cacheHits current]>[dict get $before connection cacheHits current]}] \
+        [expr {[dict get $after connection cacheHits current]==[dict get $again connection cacheHits current]}] \
+        [dict get $after statement available]
+} -cleanup {
+    ns_db dml $h {DROP TABLE IF EXISTS stats_items}
+} -result {true 1 1 0}
+
+test sqlite-stats-pending {active statement counters are read without fetching, flushing or changing row counts} -body {
+    set row [ns_db select $h {SELECT 1 AS n UNION ALL SELECT 2}]
+    set first [ns_db getrow $h $row]
+    set before [ns_db rowcount $h]
+    set stats [ns_sqlite stats $h]
+    set repeat [ns_sqlite stats $h]
+    set same [expr {[dict get $stats statement] eq [dict get $repeat statement]}]
+    set count [ns_db rowcount $h]
+    set second [ns_db getrow $h $row]
+    set n [ns_set get $row n]
+    set done [ns_db getrow $h $row]
+    list $first $before $count $second $n $done $same \
+        [dict get $stats statement available] \
+        [expr {[dict get $stats statement vmSteps]>0}]
+} -cleanup {
+    ns_db flush $h
+} -result {1 1 1 1 2 0 1 1 1}
+
+test sqlite-stats-wal-noop {WAL frame sampling does not checkpoint, write or change affected rows} -setup {
+    set walFile [file join [ns_info home] statistics-wal.sqlite3]
+    ns_db dml $h "ATTACH DATABASE [ns_dbquotevalue $walFile] AS stats_wal"
+    set row [ns_db 1row $h {PRAGMA stats_wal.journal_mode=WAL}]
+    set row [ns_db 1row $h {PRAGMA wal_autocheckpoint}]
+    set autoCheckpoint [ns_set value $row 0]
+    set row [ns_db 1row $h {PRAGMA wal_autocheckpoint=0}]
+    ns_db dml $h {CREATE TABLE stats_wal.items(v TEXT)}
+    ns_db dml $h {INSERT INTO stats_wal.items VALUES('one'),('two')}
+} -body {
+    set affected [ns_sqlite rows_affected $h]
+    set first [ns_sqlite stats $h -database stats_wal]
+    set second [ns_sqlite stats $h -database stats_wal]
+    set wal [dict get $first wal]
+    list [dict get $wal available] [dict get $wal resultCode] \
+        [expr {[dict get $wal logFrames]>0}] [dict get $wal checkpointedFrames] \
+        [expr {$wal eq [dict get $second wal]}] \
+        [expr {[dict get $first connection cacheWrites current]==[dict get $second connection cacheWrites current]}] \
+        $affected [ns_sqlite rows_affected $h]
+} -cleanup {
+    ns_db flush $h
+    set row [ns_db 1row $h "PRAGMA wal_autocheckpoint=$autoCheckpoint"]
+    ns_db dml $h {DETACH DATABASE stats_wal}
+    file delete -force $walFile ${walFile}-wal ${walFile}-shm
+} -result {1 0 1 0 1 1 2 2}
+
+test sqlite-stats-rollback {statistics do not commit or roll back caller changes} -body {
+    ns_db dml $h {CREATE TEMP TABLE stats_tx(v)}
+    ns_db dml $h BEGIN
+    ns_db dml $h {INSERT INTO stats_tx VALUES(1)}
+    ns_sqlite stats $h
+    ns_db dml $h ROLLBACK
+    set row [ns_db 1row $h {SELECT count(*) AS n FROM stats_tx}]
+    ns_set get $row n
+} -cleanup {
+    ns_db dml $h {DROP TABLE IF EXISTS stats_tx}
+} -result 0
+
+test sqlite-stats-errors {statistics validate handles, option arity and database names} -body {
+    list [catch {ns_sqlite stats invalid-handle}] \
+        [catch {ns_sqlite stats $h -database}] \
+        [catch {ns_sqlite stats $h -unknown value}] \
+        [catch {ns_sqlite stats $h -database {main; DROP TABLE items}}] \
+        [catch {ns_sqlite stats $h -database {}}]
+} -result {1 1 1 1 1}
+
+test sqlite-stats-non-wal {rollback-journal databases have no WAL snapshot} -body {
+    set db [ns_db gethandle memory]
+    try {
+        set stats [ns_sqlite stats $db]
+        list [dict get $stats wal available] [dict get $stats wal logFrames] \
+            [dict get $stats wal checkpointedFrames] [dict get $stats wal resultCode]
+    } finally {
+        ns_db releasehandle $db
+    }
+} -result {0 -1 -1 0}
+
+test sqlite-stats-foreign {foreign driver handles are rejected before private connection access} -constraints foreignDriver -body {
+    set db [ns_db gethandle foreign]
+    try {
+        catch {ns_sqlite stats $db} message
+        string match {*is not of type "sqlite"} $message
+    } finally {
+        ns_db releasehandle $db
+    }
+} -result 1

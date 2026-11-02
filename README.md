@@ -209,6 +209,95 @@ SQLite 3.53.4 is reported as `3053004`.
 also logs the driver version, runtime SQLite version, and compile-time header
 version. Inspecting versions does not execute SQL or alter results or counts.
 
+## SQLite statistics
+
+```tcl
+ns_sqlite stats $handle
+ns_sqlite stats $handle -database nsmcp_records
+```
+
+The command returns a dictionary with `connection`, `statement` and `wal`
+sections. `-database` selects the attached database for the WAL snapshot and
+otherwise defaults to `main`. The name must identify an attached database; an
+empty or unknown name is an error. Connection counters always cover the entire
+connection, including its attached databases, regardless of this option.
+
+Statistics are read directly from SQLite. This command executes no SQL, resets
+no counters, does not consume or finalize pending results, and does not change
+caller-owned transactions or driver affected-row counts. It does not force a
+checkpoint or change the automatic checkpoint policy.
+
+### Connection counters
+
+Each connection entry contains `available`, and, when supported, `current` and
+`highwater` values from `sqlite3_db_status64()`. Values are returned as Tcl wide
+integers. `available false` means SQLite does not support that counter.
+
+| Entry | Meaning and units |
+| --- | --- |
+| `cacheUsedBytes` | Current pager-cache memory, bytes |
+| `cacheUsedSharedBytes` | Cache memory with shared caches apportioned between connections, bytes |
+| `cacheHits`, `cacheMisses` | Cumulative pager-cache hits and misses (`current`) |
+| `cacheWrites` | Cumulative successful dirty-page writes (`current`); in WAL mode these are writes to the WAL, not subsequent checkpoint writes |
+| `cacheSpills` | Cumulative dirty-page spills caused by cache overflow (`current`) |
+| `schemaUsedBytes`, `statementUsedBytes` | Current memory used for schemas and prepared statements, bytes |
+| `deferredForeignKeys` | Whether unresolved deferred foreign-key constraints exist (`current`, 0 or 1) |
+| `lookasideUsed` | Current and peak allocated lookaside slots |
+| `lookasideHits` | Cumulative successful lookaside allocations (`highwater`) |
+| `lookasideMissSize`, `lookasideMissFull` | Cumulative lookaside misses due to allocation size or exhausted slots (`highwater`) |
+| `tempBufferSpillBytes` | Cumulative temporary-buffer spill bytes (`current`) |
+
+SQLite uses `current` or `highwater` differently for different counters. Unused
+fields are zero; in particular cache hit/miss/write/spill totals are in `current`,
+whereas lookaside allocation totals are in `highwater`. Gauge values such as
+cache memory should not be interpreted as monotonically increasing counters.
+
+Counters belong to the physical SQLite connection. They are not reset when a
+handle is returned to the pool, but reconnecting creates new counters. Compare
+snapshots only across a known continuous connection lifetime. A separately
+checked-out reader does not report the writer's cache counters. Sampling the
+active writer must be performed by that writer, while it owns its handle.
+
+### Pending-statement counters
+
+`statement available` indicates whether the driver currently has a prepared
+statement. When available, the section includes `fullscanSteps`, `sorts`,
+`autoindexRows`, `vmSteps`, `reprepares`, `runs` and `memoryBytes`, read using
+`sqlite3_stmt_status()` without resetting. These cover only that pending
+statement and the work already performed. They are not cumulative totals of
+previously completed queries; after finalization the statement is unavailable.
+SQLite's statement execution counters use its integer counter widths.
+
+### WAL progress
+
+`wal` contains `database`, `available`, `resultCode`, `logFrames` and
+`checkpointedFrames`. The driver uses `SQLITE_CHECKPOINT_NOOP`: it reports the
+current WAL frame counts without copying frames into the database. A database
+outside WAL mode has `available false` and frame counts of -1. If SQLite cannot
+obtain a snapshot, `resultCode` reports the SQLite error and `available` is false;
+connection and statement statistics are still returned.
+
+When available, `logFrames - checkpointedFrames` gives uncheckpointed WAL frames
+at the observation. WAL frame counts can decrease when the WAL is reset or reused;
+they are not cumulative write counters. These statistics do not report checkpoint
+execution count, checkpoint duration, synchronization duration, or physical disk
+bytes. They do not replace host I/O measurements.
+
+For example, within code already holding the writer handle:
+
+```tcl
+set before [ns_sqlite stats $handle -database nsmcp_records]
+# Perform the existing ingestion transaction here.
+set after [ns_sqlite stats $handle -database nsmcp_records]
+set writtenPages [expr {
+    [dict get $after connection cacheWrites current]
+    - [dict get $before connection cacheWrites current]
+}]
+```
+
+The commands return dictionaries directly and can be used in nscp without `puts`.
+A rebuilt driver and server restart are required; this is not a Tcl-only reload.
+
 ## Statement lifecycle
 
 Binding or fetching after a result has been canceled, flushed, exhausted, or
