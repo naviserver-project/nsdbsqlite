@@ -1,4 +1,4 @@
-# Statistics must not execute SQL, reset counters or consume pending rows.
+# Statistics must not change SQL state, reset counters or consume pending rows.
 test sqlite-stats-counters {connection snapshots retain cumulative counters} -body {
     set before [ns_sqlite stats $h]
     ns_db dml $h {CREATE TEMP TABLE stats_items(id INTEGER PRIMARY KEY,v TEXT)}

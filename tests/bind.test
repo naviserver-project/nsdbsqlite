@@ -221,4 +221,14 @@ test sqlite-bind-value-cache-nan {binding text does not discard a double NaN pay
     set result
 } -result {1 420000000000f87f 1 420000000000f87f}
 
+
+
+test sqlite-array-unsupported {array binding is rejected before entering an unsupported typed driver} -body {
+    set ids {1 2 3}
+    catch {sqliteBindRow $h {SELECT :ids} -bindtypes {ids array}} message
+    list [ns_db bindinfo $h -types] \
+        [string match {*does not support SQL array bind vars*} $message] \
+        [sqliteBindRow $h {SELECT 1 AS n}]
+} -result {{scalar binary} 1 {n 1}}
+
 rename sqliteBindRow {}

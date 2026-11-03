@@ -58,3 +58,35 @@ foreach {pool source} {relative shared.db shared shared.db memory :memory: neste
         ns_param datasource $source
     }
 }
+
+ns_section ns/db/pools {
+    ns_param policies {Pool policy tests}
+}
+ns_section ns/db/pool/policies {
+    ns_param driver sqlite
+    ns_param connections 2
+    ns_param datasource $home/policies.db
+}
+ns_section ns/db/pool/policies/sqlite {
+    ns_param journalMode WAL
+    ns_param synchronous NORMAL
+    ns_param walAutoCheckpointPages 4000
+    ns_param busyTimeoutMs 321
+    ns_param cacheSizeKiB 8192
+    ns_param tempStore MEMORY
+    ns_param mmapSizeBytes 0
+    ns_param journalSizeLimitBytes 1048576
+}
+ns_set update [ns_configsection ns/server/test/db] pools $testPools,policies,unavailable-policy
+
+ns_section ns/db/pools {
+    ns_param unavailable-policy {Unsupported WAL policy test}
+}
+ns_section ns/db/pool/unavailable-policy {
+    ns_param driver sqlite
+    ns_param connections 1
+    ns_param datasource :memory:
+}
+ns_section ns/db/pool/unavailable-policy/sqlite {
+    ns_param journalMode WAL
+}

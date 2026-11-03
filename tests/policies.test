@@ -1,0 +1,108 @@
+# Pool policies apply on connection creation and reset, without application PRAGMAs.
+test sqlite-pool-policy-open {both handles receive all configured policies} -body {
+    set handles [ns_db gethandle policies 2]
+    set results {}
+    foreach db $handles {
+        set policy [dict get [ns_sqlite stats $db] policy]
+        lappend results [list [dict get $policy journalMode] [dict get $policy synchronous] \
+            [dict get $policy walAutoCheckpointPages] [dict get $policy busyTimeoutMs] \
+            [dict get $policy cacheSize] [dict get $policy tempStore] \
+            [dict get $policy mmapSizeBytes] [dict get $policy journalSizeLimitBytes]]
+    }
+    foreach db $handles {
+        ns_db releasehandle $db
+    }
+    set results
+} -result {{WAL NORMAL 4000 321 -8192 MEMORY 0 1048576} {WAL NORMAL 4000 321 -8192 MEMORY 0 1048576}}
+
+test sqlite-pool-policy-reset {returning a modified handle restores the configured defaults} -body {
+    set db [ns_db gethandle policies]
+    foreach statement {{PRAGMA synchronous=OFF} {PRAGMA cache_size=-1000} {PRAGMA busy_timeout=1} {PRAGMA wal_autocheckpoint=0}} {
+        ns_db exec $db $statement
+        ns_db flush $db
+    }
+    ns_db releasehandle $db
+    set db [ns_db gethandle policies]
+    set policy [dict get [ns_sqlite stats $db] policy]
+    ns_db releasehandle $db
+    list [dict get $policy synchronous] [dict get $policy cacheSize] \
+        [dict get $policy busyTimeoutMs] [dict get $policy walAutoCheckpointPages]
+} -result {NORMAL -8192 321 4000}
+
+test sqlite-pool-policy-missing {unspecified policies retain SQLite defaults} -body {
+    set db [ns_db gethandle memory]
+    set policy [dict get [ns_sqlite stats $db] policy]
+    ns_db releasehandle $db
+    list [dict get $policy journalMode] [dict get $policy synchronous] \
+        [dict get $policy walAutoCheckpointPages]
+} -result {MEMORY FULL 1000}
+
+foreach {key value} {
+    journalMode {WAL; DROP TABLE anything}
+    synchronous invalid
+    busyTimeoutMs -1
+    cacheSizeKiB 0
+    walAutoCheckpointPages 2147483648
+    tempStore 3
+    mmapSizeBytes -1
+    journalSizeLimitBytes -2
+} {
+    test sqlite-pool-policy-invalid-$key {invalid policy is rejected before opening the datasource} -body {
+        set section [ns_configsection ns/db/pool/policies/sqlite]
+        set old [ns_set get $section $key]
+        ns_db bouncepool policies
+        ns_set update $section $key $value
+        try {
+            catch {ns_db gethandle -timeout 0:100000 policies}
+        } finally {
+            ns_set update $section $key $old
+            ns_db bouncepool policies
+        }
+    } -result 1
+}
+
+test sqlite-pool-policy-unavailable {an unsupported requested journal mode fails effective-value verification} -body {
+    catch {ns_db gethandle -timeout 0:100000 unavailable-policy}
+} -result 1
+
+foreach journal {DELETE WAL TRUNCATE PERSIST} {
+    foreach {sync level} {OFF 0 NORMAL 1 FULL 2 EXTRA 3} {
+        test sqlite-pool-policy-$journal-$sync {journal and synchronization modes are case-insensitive and effective} -body {
+            set section [ns_configsection ns/db/pool/policies/sqlite]
+            ns_db bouncepool policies
+            ns_set update $section journalMode [string tolower $journal]
+            ns_set update $section synchronous [string tolower $sync]
+            set db [ns_db gethandle policies]
+            try {
+                set actual [dict get [ns_sqlite stats $db] policy]
+                list [dict get $actual journalMode] [dict get $actual synchronousValue]
+            } finally {
+                ns_db releasehandle $db
+            }
+        } -cleanup {
+            ns_set update $section journalMode WAL
+            ns_set update $section synchronous NORMAL
+            ns_db bouncepool policies
+        } -result [list $journal $level]
+    }
+}
+
+
+test sqlite-pool-policy-reset-failure {a failed reset closes the native connection and preserves committed data} -body {
+    set section [ns_configsection ns/db/pool/policies/sqlite]
+    set db [ns_db gethandle policies]
+    ns_db dml $db {CREATE TABLE IF NOT EXISTS policy_preserved(v)}
+    ns_db dml $db {INSERT INTO policy_preserved VALUES(42)}
+    ns_set update $section synchronous invalid
+    ns_db releasehandle $db
+    ns_set update $section synchronous NORMAL
+    set db [ns_db gethandle policies]
+    try {
+        set row [ns_db 1row $db {SELECT count(*) AS n FROM policy_preserved WHERE v=42}]
+        list [ns_set get $row n] [dict get [ns_sqlite stats $db] policy synchronous]
+    } finally {
+        ns_db releasehandle $db
+    }
+} -cleanup {
+    ns_set update $section synchronous NORMAL
+} -result {1 NORMAL}

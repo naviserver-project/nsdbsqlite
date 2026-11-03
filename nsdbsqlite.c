@@ -67,6 +67,51 @@ typedef struct {
 } Context;
 
 /*
+ * Pool policies are optional. Without a configured value, SQLite retains its
+ * native default or persistent journal mode. Policies apply only to main;
+ * applications own the policy of any databases they explicitly attach.
+ */
+typedef enum {
+    PolicyBusyTimeout, PolicyJournal, PolicySynchronous, PolicyWalCheckpoint,
+    PolicyCache, PolicyTempStore, PolicyMmap, PolicyJournalLimit, PolicyCount
+} PolicyIndex;
+
+typedef struct {
+    const char        *key;
+    const char        *pragma;
+    const char *const *names;
+    sqlite3_int64      minimum;
+    sqlite3_int64      maximum;
+} PolicySpec;
+
+typedef struct {
+    bool           configured[PolicyCount];
+    sqlite3_int64  values[PolicyCount];
+} PoolPolicy;
+
+static const char *const journalNames[] = {"DELETE", "TRUNCATE", "PERSIST", "MEMORY", "WAL", "OFF", NULL};
+static const char *const synchronousNames[] = {"OFF", "NORMAL", "FULL", "EXTRA", NULL};
+static const char *const tempNames[] = {"DEFAULT", "FILE", "MEMORY", NULL};
+static const PolicySpec policySpecs[PolicyCount] = {
+    {"busyTimeoutMs",          "busy_timeout",       NULL,               0, INT_MAX},
+    {"journalMode",            "journal_mode",       journalNames,       0, 0},
+    {"synchronous",            "synchronous",        synchronousNames,   0, 0},
+    {"walAutoCheckpointPages", "wal_autocheckpoint",  NULL,               0, INT_MAX},
+    {"cacheSizeKiB",           "cache_size",         NULL,               1, INT_MAX},
+    {"tempStore",              "temp_store",         tempNames,          0, 0},
+    {"mmapSizeBytes",          "mmap_size",          NULL,               0, INT64_MAX},
+    {"journalSizeLimitBytes",  "journal_size_limit", NULL,              -1, INT64_MAX}
+};
+
+static Ns_ReturnCode DbPoolPolicyRead(const char *pool, PoolPolicy *policy)
+    NS_GNUC_NONNULL(2);
+static int DbPoolPolicyValue(sqlite3 *db, PolicyIndex index, sqlite3_int64 *value)
+    NS_GNUC_NONNULL(1, 3);
+static Ns_ReturnCode DbPoolPolicyApply(Ns_DbHandle *handle, const PoolPolicy *policy)
+    NS_GNUC_NONNULL(1, 2);
+
+
+/*
  * Local functions defined in this file.
  */
 
@@ -232,8 +277,7 @@ BoundTextGet(Tcl_Interp *interp, Tcl_Obj *objPtr)
     return textPtr;
 }
 
-static Ns_DbBindExecProc DbBindExec;
-static Ns_DbBindTypedExecProc DbBindTypedExec;
+static Ns_DbBindTypedExecProc DbBindExec;
 #endif
 
 #ifdef NS_DB_BIND_PARAMETER_ABI
@@ -258,8 +302,7 @@ static Ns_DbProc dbProcs[] = {
     { DbFn_ResetHandle,  (ns_funcptr_t)DbResetHandle },
     { DbFn_Exec,         (ns_funcptr_t)DbExec },
 #ifdef NS_DB_BIND_ABI
-    { DbFn_Bind,         (ns_funcptr_t)DbBindExec },
-    { DbFn_BindTyped,    (ns_funcptr_t)DbBindTypedExec },
+    { DbFn_BindTyped,    (ns_funcptr_t)DbBindExec },
 #endif
 #ifdef NS_DB_BIND_PARAMETER_ABI
     { DbFn_BindParameter, (ns_funcptr_t)DbBindParameter },
@@ -1110,6 +1153,13 @@ DbConfigureDatasources(const char *driver)
         if (poolDriver == NULL || !STREQ(poolDriver, driver)) {
             continue;
         }
+        {
+            PoolPolicy policy;
+
+            if (DbPoolPolicyRead(Ns_SetKey(pools, i), &policy) != NS_OK) {
+                return NS_ERROR;
+            }
+        }
         source = Ns_ConfigGetValue(section, "datasource");
         /* Missing datasources are rejected by nsdb. Preserve SQLite's special
          * names, URI spelling, and explicitly supplied absolute paths.
@@ -1163,6 +1213,181 @@ static Ns_ReturnCode DbServerInit(char *server, char *UNUSED(module), char *UNUS
     return NS_OK;
 }
 
+/*
+ *----------------------------------------------------------------------
+ *
+ * DbPoolPolicyRead --
+ *
+ *      Validate the SQLite subsection of a pool before opening its database.
+ *      Named values are case-insensitive; numeric limits match SQLite's API.
+ *
+ * Results:
+ *      NS_OK, or NS_ERROR with a pool/key diagnostic. No database is opened.
+ *
+ * Side effects:
+ *      None, apart from configuration diagnostics.
+ *
+ *----------------------------------------------------------------------
+ */
+static Ns_ReturnCode
+DbPoolPolicyRead(const char *pool, PoolPolicy *policy)
+{
+    const char *section;
+
+    memset(policy, 0, sizeof(PoolPolicy));
+    if (pool == NULL) {
+        return NS_OK;
+    }
+    section = Ns_ConfigGetPath(NULL, NULL, "db", "pool", pool, "sqlite", NS_SENTINEL);
+    for (size_t i = 0; i < PolicyCount; i++) {
+        const PolicySpec *spec = &policySpecs[i];
+        const char       *text = Ns_ConfigGetValue(section, spec->key);
+        Tcl_WideInt       value = 0;
+        bool              valid = NS_FALSE;
+
+        if (text == NULL) {
+            continue;
+        }
+        if (spec->names != NULL) {
+            for (size_t j = 0; spec->names[j] != NULL; j++) {
+                if (STRIEQ(text, spec->names[j])) {
+                    value = (Tcl_WideInt)j;
+                    valid = NS_TRUE;
+                    break;
+                }
+            }
+        } else {
+            Tcl_Obj *obj = Tcl_NewStringObj(text, -1);
+
+            Tcl_IncrRefCount(obj);
+            if (Tcl_GetWideIntFromObj(NULL, obj, &value) == TCL_OK
+                && value >= spec->minimum && value <= spec->maximum) {
+                valid = NS_TRUE;
+            }
+            Tcl_DecrRefCount(obj);
+        }
+        if (!valid) {
+            Ns_Log(Error, "nsdbsqlite: invalid pool policy %s/%s", section, spec->key);
+            return NS_ERROR;
+        }
+        policy->configured[i] = NS_TRUE;
+        policy->values[i] = i == PolicyCache ? -(sqlite3_int64)value : (sqlite3_int64)value;
+    }
+    return NS_OK;
+}
+
+/*
+ *----------------------------------------------------------------------
+ *
+ * DbPoolPolicyValue --
+ *
+ *      Read a policy PRAGMA without changing the connection or checkpointing.
+ *
+ * Results:
+ *      SQLITE_OK and the numeric value (journal mode uses its name index), or
+ *      an SQLite result code. Statements are finalized on every path.
+ *
+ * Side effects:
+ *      None.
+ *
+ *----------------------------------------------------------------------
+ */
+static int
+DbPoolPolicyValue(sqlite3 *db, PolicyIndex index, sqlite3_int64 *value)
+{
+    sqlite3_stmt *statement = NULL;
+    char          sql[96];
+    int           rc;
+
+    sqlite3_snprintf((int)sizeof(sql), sql, "PRAGMA main.%s", policySpecs[index].pragma);
+    rc = sqlite3_prepare_v2(db, sql, -1, &statement, NULL);
+    if (rc == SQLITE_OK) {
+        rc = sqlite3_step(statement);
+        if (rc == SQLITE_ROW) {
+            if (index == PolicyJournal) {
+                const char *text = (const char *)sqlite3_column_text(statement, 0);
+
+                rc = SQLITE_ERROR;
+                for (size_t i = 0; journalNames[i] != NULL; i++) {
+                    if (text != NULL && STRIEQ(text, journalNames[i])) {
+                        *value = (sqlite3_int64)i;
+                        rc = SQLITE_OK;
+                        break;
+                    }
+                }
+            } else {
+                *value = sqlite3_column_int64(statement, 0);
+                rc = SQLITE_OK;
+            }
+        } else if (rc == SQLITE_DONE) {
+            rc = SQLITE_ERROR;
+        }
+    }
+    if (statement != NULL) {
+        int finalRc = sqlite3_finalize(statement);
+
+        if (rc == SQLITE_OK) {
+            rc = finalRc;
+        }
+    }
+    return rc;
+}
+
+/*
+ *----------------------------------------------------------------------
+ *
+ * DbPoolPolicyApply --
+ *
+ *      Install configured main-database/connection defaults on open and reset.
+ *      Avoid changing values already in effect, especially journal mode.
+ *
+ * Results:
+ *      NS_OK, or NS_ERROR with the SQLite/policy diagnostic on the handle.
+ *
+ * Side effects:
+ *      Change configured PRAGMAs. A requested mode must be effective; SQLite's
+ *      silent refusal (for example WAL for :memory:) is reported as an error.
+ *
+ *----------------------------------------------------------------------
+ */
+static Ns_ReturnCode
+DbPoolPolicyApply(Ns_DbHandle *handle, const PoolPolicy *policy)
+{
+    sqlite3      *db = ((Connection *)handle->connection)->db;
+    char          sql[128];
+
+    for (size_t i = 0; i < PolicyCount; i++) {
+        sqlite3_int64 current;
+        int           rc;
+
+        if (!policy->configured[i]) {
+            continue;
+        }
+        rc = DbPoolPolicyValue(db, (PolicyIndex)i, &current);
+        if (rc == SQLITE_OK && current == policy->values[i]) {
+            continue;
+        }
+        if (rc == SQLITE_OK) {
+            if (i == PolicyJournal) {
+                sqlite3_snprintf((int)sizeof(sql), sql, "PRAGMA main.journal_mode=%s",
+                                 journalNames[(size_t)policy->values[i]]);
+            } else {
+                sqlite3_snprintf((int)sizeof(sql), sql, "PRAGMA main.%s=%lld",
+                                 policySpecs[i].pragma, (long long)policy->values[i]);
+            }
+            rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+        }
+        if (rc != SQLITE_OK || DbPoolPolicyValue(db, (PolicyIndex)i, &current) != SQLITE_OK
+            || current != policy->values[i]) {
+            Ns_Log(Error, "nsdbsqlite: cannot apply pool '%s' SQLite policy '%s': %s",
+                   handle->poolname, policySpecs[i].key, sqlite3_errmsg(db));
+            Ns_DbSetException(handle, "NSDB", "SQLite pool policy could not be applied");
+            return NS_ERROR;
+        }
+    }
+    return NS_OK;
+}
+
 static const char *
 DbName(void)
 {
@@ -1208,8 +1433,14 @@ DbOpen(Ns_DbHandle *handle)
 {
     sqlite3         *db = NULL;
     Connection      *connectionPtr;
+    PoolPolicy       policy;
+    int              rc;
 
-    int rc = sqlite3_open(handle->datasource, &db);
+    if (DbPoolPolicyRead(handle->poolname, &policy) != NS_OK) {
+        Ns_DbSetException(handle, "NSDB", "invalid SQLite pool policy");
+        return NS_ERROR;
+    }
+    rc = sqlite3_open(handle->datasource, &db);
 
     if (rc != SQLITE_OK) {
         const char *message = db != NULL ? sqlite3_errmsg(db) : sqlite3_errstr(rc);
@@ -1228,6 +1459,13 @@ DbOpen(Ns_DbHandle *handle)
     handle->connection = connectionPtr;
     handle->connected = NS_TRUE;
     handle->statement = NULL;
+    if (DbPoolPolicyApply(handle, &policy) != NS_OK) {
+        sqlite3_close(db);
+        ns_free(connectionPtr);
+        handle->connection = NULL;
+        handle->connected = NS_FALSE;
+        return NS_ERROR;
+    }
 
     return NS_OK;
 }
@@ -1362,13 +1600,6 @@ DbExec(Ns_DbHandle *handle, char *sql)
  * one SQLite binding; no value is ever concatenated into SQL text. */
 static int
 DbBindExec(Tcl_Interp *interp, Ns_DbHandle *handle, const char *sql,
-           TCL_SIZE_T count, Tcl_Obj *const *names, Tcl_Obj *const *values)
-{
-    return DbBindTypedExec(interp, handle, sql, count, names, values, NULL);
-}
-
-static int
-DbBindTypedExec(Tcl_Interp *interp, Ns_DbHandle *handle, const char *sql,
                 TCL_SIZE_T count, Tcl_Obj *const *names, Tcl_Obj *const *values,
                 const Ns_DbBindValueType *types)
 {
@@ -1550,6 +1781,16 @@ DbResetHandle(Ns_DbHandle *handle)
             return NS_ERROR;
         }
     }
+    {
+        PoolPolicy policy;
+
+        if (DbPoolPolicyRead(handle->poolname, &policy) != NS_OK
+            || DbPoolPolicyApply(handle, &policy) != NS_OK) {
+            /* nsdb's pool return ignores reset errors; do not reuse bad state. */
+            (void) DbClose(handle);
+            return NS_ERROR;
+        }
+    }
     return status;
 }
 
@@ -1683,6 +1924,31 @@ DbStats(Tcl_Interp *interp, Ns_DbHandle *handle, const char *database)
     Tcl_DictObjPut(NULL, result, NEW_LITERAL_OBJ("connection"), counters);
     Tcl_DictObjPut(NULL, result, NEW_LITERAL_OBJ("statement"), statement);
     Tcl_DictObjPut(NULL, result, NEW_LITERAL_OBJ("wal"), wal);
+    {
+        Tcl_Obj *policy = Tcl_NewDictObj();
+
+        for (size_t j = 0; j < PolicyCount; j++) {
+            sqlite3_int64 value;
+
+            if (DbPoolPolicyValue(connection->db, (PolicyIndex)j, &value) == SQLITE_OK) {
+                const char *key = j == PolicyCache ? "cacheSize" : policySpecs[j].key;
+                Tcl_Obj    *obj;
+
+                if (policySpecs[j].names != NULL) {
+                    obj = Tcl_NewStringObj(policySpecs[j].names[(size_t)value], -1);
+                } else {
+                    obj = Tcl_NewWideIntObj((Tcl_WideInt)value);
+                }
+                Tcl_DictObjPut(NULL, policy, Tcl_NewStringObj(key, -1), obj);
+                if (j == PolicySynchronous) {
+                    Tcl_DictObjPut(NULL, policy, NEW_LITERAL_OBJ("synchronousValue"),
+                                    Tcl_NewWideIntObj((Tcl_WideInt)value));
+                }
+            }
+        }
+        Tcl_DictObjPut(NULL, result, NEW_LITERAL_OBJ("policy"), policy);
+    }
+
 
     for (i = 0u; i < sizeof(connectionStats) / sizeof(connectionStats[0]); i++) {
         sqlite3_int64 current = 0, highwater = 0;

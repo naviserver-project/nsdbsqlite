@@ -459,8 +459,11 @@ each execution; the shape cache is not a connection statement cache.
 
 ### Explicit binary binding
 
-With core `NS_DB_BIND_ABI`, this driver registers `DbFn_BindTyped` in
-addition to the unchanged text callback. Core binding syntax version 5 adds
+With core `NS_DB_BIND_ABI`, this driver registers one `DbFn_BindTyped`
+callback for text and binary parameters. A NULL types array means all text;
+there is no separate text wrapper. This requires the matching core generalized
+dispatch. Core continues supporting other drivers with legacy text-only
+callbacks. Core binding syntax version 5 adds
 `-bindtypes {key binary}` and `-bindtypes {values {rows {binary scalar scalar}}}`.
 SQLite uses `sqlite3_bind_blob64()` with the exact Tcl bytearray bytes and
 `SQLITE_TRANSIENT`. Embedded NUL and all high bytes are preserved. Empty binary
@@ -478,3 +481,49 @@ returns. Numeric, list, dictionary, bytearray and other foreign representations
 are preserved and use temporary encoded text; explicit binary values bypass
 this text cache. Text containing NUL remains an error. SQL and parameter-value
 caches do not create a connection-level prepared-statement cache.
+
+
+### SQL array parameters
+
+Core binding syntax version 6 adds native SQL `array` parameters. SQLite does
+not support this interpretation. `ns_db bindinfo $h -types` reports
+`scalar binary`; requesting `-bindtypes {ids array}` returns an explicit
+unsupported-array error before execution. Use `list` for IN expansion or `rows`
+for VALUES expansion instead; their existing semantics are unchanged.
+
+
+### Per-pool connection policy
+
+Configure SQLite policies in `ns/db/pool/POOL/sqlite`. This driver applies them
+when opening a native connection and restores them when its handle returns to
+the pool. Applications select a pool and keep their own retention/schema/budget
+settings; they need not issue baseline PRAGMAs. Policies address the primary
+`main` database and connection-level options, not arbitrary attached databases.
+Unspecified options retain SQLite defaults (including a file's persistent WAL mode).
+
+| Parameter | Accepted values | Meaning |
+| --- | --- | --- |
+| journalMode | DELETE, TRUNCATE, PERSIST, MEMORY, WAL, OFF | Primary database journal mode |
+| synchronous | OFF, NORMAL, FULL, EXTRA | Synchronization policy |
+| walAutoCheckpointPages | 0..2147483647 | Automatic WAL checkpoint trigger; 0 disables it |
+| busyTimeoutMs | 0..2147483647 | SQLite lock wait in milliseconds |
+| cacheSizeKiB | 1..2147483647 | Cache target, applied as negative cache_size |
+| tempStore | DEFAULT, FILE, MEMORY | Temporary storage policy |
+| mmapSizeBytes | 0..9223372036854775807 | Memory map limit in bytes |
+| journalSizeLimitBytes | -1..9223372036854775807 | Retained journal/WAL size limit |
+
+Names are case-insensitive. Numeric values are integer counts, not unit strings.
+Invalid values fail before opening a datasource. Unsupported or clamped values
+fail effective-value verification rather than silently selecting another policy.
+`ns_sqlite stats $handle` reports a `policy` dictionary; `cacheSize` is SQLite's
+raw signed cache_size (negative KiB, positive pages), and `synchronousValue`
+additionally reports the numeric synchronization level. Reading statistics does
+not run a checkpoint. Normal reset rolls back unfinished work before restoring
+policy; failed policy reset closes the native connection instead of reusing it.
+
+WAL/NORMAL allows concurrent readers and one writer and preserves consistency,
+but can lose recent commits on system failure. OFF can permit corruption. Pool
+size and application recovery requirements must be chosen separately. Zero
+checkpoint threshold requires an application/administrative checkpoint strategy.
+Changing configuration takes effect on reconnect/reset; restart for consistent
+policies across all worker interpreters and handles.
