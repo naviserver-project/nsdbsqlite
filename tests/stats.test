@@ -106,3 +106,150 @@ test sqlite-stats-foreign {foreign driver handles are rejected before private co
         ns_db releasehandle $db
     }
 } -result 1
+
+
+test sqlite-stats-generic-mapping {generic scalar metrics and backend fields preserve legacy measurements} -body {
+    set generic [ns_db stats $h]
+    set alias [ns_sqlite stats $h]
+    list [dict get $generic driver] [dict get $generic supported] \
+        [expr {[dict get $generic backend sqlite policy] eq [dict get $alias policy]}] \
+        [expr {[dict get $generic connection cacheHits]==[dict get $alias connection cacheHits current]}] \
+        [expr {[dict get $generic backend sqlite connection cacheWrittenPages]==[dict get $alias connection cacheWrites current]}] \
+        [dict exists $generic connection memoryUsedBytes] \
+        [dict exists $generic highwater connection cacheUsedBytes] \
+        [dict exists $alias connection cacheHits available]
+} -result {sqlite 1 1 1 1 0 0 1}
+
+test sqlite-stats-generic-pending {generic dispatch preserves active rows, affected count and driver diagnostics} -body {
+    set row [ns_db select $h {SELECT 7 AS n UNION ALL SELECT 8}]
+    ns_db getrow $h $row
+    set before [ns_db rowcount $h]
+    set affected [ns_sqlite rows_affected $h]
+    ns_db setexception $h STAT {keep diagnostic}
+    set stats [ns_db stats $h -database main]
+    set code [ns_dberrorcode $h]
+    set message [ns_dberrormsg $h]
+    set count [ns_db rowcount $h]
+    set next [ns_db getrow $h $row]
+    list [dict exists $stats statement executions] $before $count $next [ns_set get $row n] \
+        [expr {$affected==[ns_sqlite rows_affected $h]}] $code $message
+} -cleanup {
+    ns_db flush $h
+    ns_db setexception $h {} {}
+} -result {1 1 1 1 8 1 STAT {keep diagnostic}}
+
+test sqlite-stats-generic-rollback {generic statistics never commit an application transaction} -body {
+    ns_db dml $h {CREATE TEMP TABLE generic_stats_tx(v)}
+    ns_db dml $h BEGIN
+    ns_db dml $h {INSERT INTO generic_stats_tx VALUES(1)}
+    ns_db stats $h
+    ns_db dml $h ROLLBACK
+    set row [ns_db 1row $h {SELECT count(*) AS n FROM generic_stats_tx}]
+    ns_set get $row n
+} -cleanup {
+    ns_db dml $h {DROP TABLE IF EXISTS generic_stats_tx}
+} -result 0
+
+test sqlite-stats-generic-errors {generic and alias database validation agree} -body {
+    set results {}
+    foreach command {ns_db ns_sqlite} {
+        foreach database {{} missing {main; DROP TABLE items}} {
+            lappend results [catch {$command stats $h -database $database}]
+        }
+    }
+    set results
+} -result {1 1 1 1 1 1}
+
+test sqlite-stats-generic-disconnected {both entry points reject disconnected handles safely} -body {
+    set db [ns_db gethandle relative]
+    try {
+        ns_db disconnect $db
+        set generic [catch {ns_db stats $db} message genericOptions]
+        set legacy [catch {ns_sqlite stats $db} message legacyOptions]
+        list $generic $legacy [dict get $genericOptions -errorcode] [dict get $legacyOptions -errorcode]
+    } finally {
+        ns_db releasehandle $db
+    }
+} -result {1 1 {NSDB STATS DISCONNECTED} {NSDB STATS DISCONNECTED}}
+
+
+proc statsHasAvailability {value} {
+    if {[catch {dict size $value}]} {
+        return false
+    }
+    dict for {key child} $value {
+        if {$key eq "available" || [statsHasAvailability $child]} {
+            return true
+        }
+    }
+    return false
+}
+
+test sqlite-stats-generic-omissions {idle statements and non-WAL snapshots are omitted, and measured zero remains present} -body {
+    set db [ns_db gethandle memory]
+    try {
+        ns_db flush $db
+        set stats [ns_db stats $db]
+        set legacy [ns_sqlite stats $db]
+        list [dict exists $stats statement] [dict exists $stats backend sqlite statement] \
+            [dict exists $stats backend sqlite wal] [statsHasAvailability $stats] \
+            [dict get $stats connection cacheMisses] \
+            [dict get $legacy statement available] [dict get $legacy wal logFrames]
+    } finally {
+        ns_db releasehandle $db
+    }
+} -result {0 0 0 false 0 0 -1}
+
+test sqlite-stats-generic-statement {statement metrics use shared names and remain independent of result fetching} -body {
+    set row [ns_db select $h {SELECT 1 AS n UNION ALL SELECT 2}]
+    set initial [ns_db stats $h]
+    ns_db getrow $h $row
+    set stats [ns_db stats $h]
+    set legacy [ns_sqlite stats $h]
+    list [dict get $initial statement rowsReturned] [dict get $stats statement rowsReturned] \
+        [dict get $stats statement executions] \
+        [expr {[dict get $stats statement memoryUsedBytes]==[dict get $legacy statement memoryBytes]}] \
+        [expr {[dict get $stats backend sqlite statement vmSteps]==[dict get $legacy statement vmSteps]}] \
+        [dict exists $stats statement runs] [dict exists $stats statement memoryBytes] \
+        [dict exists $stats statement fullScanSteps]
+} -cleanup {
+    ns_db flush $h
+} -result {0 1 1 1 1 0 0 0}
+
+test sqlite-stats-generic-dml-rows {affected rows are not reported as returned result rows} -body {
+    ns_db dml $h {CREATE TEMP TABLE stats_dml(v)}
+    ns_db dml $h {INSERT INTO stats_dml VALUES(1),(2)}
+    set stats [ns_db stats $h]
+    list [ns_sqlite rows_affected $h] [dict get $stats statement rowsReturned]
+} -cleanup {
+    ns_db dml $h {DROP TABLE stats_dml}
+} -result {2 0}
+
+test sqlite-stats-generic-wal {WAL metrics are backend-specific and sampling neither checkpoints nor consumes rows} -setup {
+    set file [file join [ns_info home] generic-wal.sqlite3]
+    ns_db dml $h "ATTACH DATABASE [ns_dbquotevalue $file] AS generic_wal"
+    ns_db 1row $h {PRAGMA generic_wal.journal_mode=WAL}
+    set old [ns_set value [ns_db 1row $h {PRAGMA wal_autocheckpoint}] 0]
+    ns_db 1row $h {PRAGMA wal_autocheckpoint=0}
+    ns_db dml $h {CREATE TABLE generic_wal.items(v)}
+    ns_db dml $h {INSERT INTO generic_wal.items VALUES(1),(2)}
+} -body {
+    set first [dict get [ns_db stats $h -database generic_wal] backend sqlite wal]
+    set second [dict get [ns_db stats $h -database generic_wal] backend sqlite wal]
+    ns_db dml $h BEGIN
+    ns_db dml $h {INSERT INTO generic_wal.items VALUES(3)}
+    set blocked [dict get [ns_db stats $h -database generic_wal] backend sqlite wal]
+    set legacy [dict get [ns_sqlite stats $h -database generic_wal] wal]
+    ns_db dml $h ROLLBACK
+    list [dict get $first database] [expr {[dict get $first logFrames]>0}] \
+        [dict get $first checkpointedFrames] [expr {$first eq $second}] \
+        [dict exists $first available] [dict exists $first resultCode] \
+        [dict exists $blocked logFrames] [dict exists $blocked reason] \
+        [dict get $blocked resultCode] [dict get $legacy available] [dict get $legacy logFrames]
+} -cleanup {
+    ns_db 1row $h "PRAGMA wal_autocheckpoint=$old"
+    ns_db dml $h {DETACH DATABASE generic_wal}
+    file delete -force $file $file-wal $file-shm
+} -result {generic_wal 1 0 1 0 0 0 1 6 0 -1}
+
+rename statsHasAvailability {}

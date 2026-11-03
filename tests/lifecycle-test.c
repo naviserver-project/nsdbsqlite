@@ -5,7 +5,12 @@
  */
 
 /* Exercise callback states and finalization failures hidden by ns_db cleanup. */
+#include "../sqlite3.h"
+static int StatsStatus(sqlite3 *db, int operation, sqlite3_int64 *current,
+                       sqlite3_int64 *peak, int reset);
+#define sqlite3_db_status64 StatsStatus
 #include "../nsdbsqlite.c"
+#undef sqlite3_db_status64
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +22,63 @@
             exit(1);                                                                               \
         }                                                                                          \
     } while (0)
+
+static int statsUnsupported = -1;
+static bool statsSynthetic = NS_FALSE;
+
+/* Inject unsupported verbs without requiring a different SQLite build. */
+static int
+StatsStatus(sqlite3 *db, int operation, sqlite3_int64 *current, sqlite3_int64 *peak, int reset)
+{
+    if (statsUnsupported == -2 || statsUnsupported == operation) {
+        return SQLITE_ERROR;
+    }
+    if (statsSynthetic && operation == SQLITE_DBSTATUS_LOOKASIDE_HIT) {
+        *current = 0;
+        *peak = 123;
+        return SQLITE_OK;
+    }
+    if (statsSynthetic && operation == SQLITE_DBSTATUS_LOOKASIDE_USED) {
+        *current = 2;
+        *peak = 7;
+        return SQLITE_OK;
+    }
+    return sqlite3_db_status64(db, operation, current, peak, reset);
+}
+
+static void StatsCheck(Ns_DbHandle *handle) NS_GNUC_NONNULL(1);
+
+/* Verify omission and highwater semantics independently of build options. */
+static void
+StatsCheck(Ns_DbHandle *handle)
+{
+    Tcl_Interp *interp = Tcl_CreateInterp();
+
+    statsUnsupported = SQLITE_DBSTATUS_CACHE_MISS;
+    CHECK(DbStatsCollect(interp, handle, NULL, NS_FALSE) == TCL_OK);
+    CHECK(Tcl_SetVar2Ex(interp, "stats", NULL, Tcl_GetObjResult(interp), 0) != NULL);
+    CHECK(Tcl_Eval(interp, "expr {![dict exists $stats connection cacheMisses] && [dict exists $stats connection cacheHits]}") == TCL_OK);
+    CHECK(strcmp(Tcl_GetStringResult(interp), "1") == 0);
+    CHECK(DbStatsCollect(interp, handle, NULL, NS_TRUE) == TCL_OK);
+    CHECK(Tcl_SetVar2Ex(interp, "stats", NULL, Tcl_GetObjResult(interp), 0) != NULL);
+    CHECK(Tcl_Eval(interp, "expr {![dict get $stats connection cacheMisses available] && ![dict exists $stats connection cacheMisses current]}") == TCL_OK);
+    CHECK(strcmp(Tcl_GetStringResult(interp), "1") == 0);
+
+    statsUnsupported = -2;
+    CHECK(DbStatsCollect(interp, handle, NULL, NS_FALSE) == TCL_OK);
+    CHECK(Tcl_SetVar2Ex(interp, "stats", NULL, Tcl_GetObjResult(interp), 0) != NULL);
+    CHECK(Tcl_Eval(interp, "expr {![dict exists $stats connection] && ![dict exists $stats backend sqlite connection] && ![dict exists $stats highwater]}") == TCL_OK);
+    CHECK(strcmp(Tcl_GetStringResult(interp), "1") == 0);
+
+    statsUnsupported = -1;
+    statsSynthetic = NS_TRUE;
+    CHECK(DbStatsCollect(interp, handle, NULL, NS_FALSE) == TCL_OK);
+    CHECK(Tcl_SetVar2Ex(interp, "stats", NULL, Tcl_GetObjResult(interp), 0) != NULL);
+    CHECK(Tcl_Eval(interp, "expr {[dict get $stats backend sqlite connection lookasideHits]==123 && [dict get $stats backend sqlite connection lookasideUsedSlots]==2 && [dict get $stats highwater backend sqlite connection lookasideUsedSlots]==7 && ![dict exists $stats highwater backend sqlite connection lookasideHits] && ![dict exists $stats highwater connection cacheUsedBytes]}") == TCL_OK);
+    CHECK(strcmp(Tcl_GetStringResult(interp), "1") == 0);
+    statsSynthetic = NS_FALSE;
+    Tcl_DeleteInterp(interp);
+}
 
 /*
  *----------------------------------------------------------------------
@@ -79,6 +141,7 @@ main(int argc, char **argv)
     handle.datasource = ":memory:";
     handle.row = Ns_SetCreate("test");
     CHECK(DbOpen(&handle) == NS_OK);
+    StatsCheck(&handle);
     handle.fetchingRows = NS_TRUE;
     CHECK(DbCancel(&handle) == NS_OK && !handle.fetchingRows);
     contextPtr = ns_calloc(1, sizeof(Context));

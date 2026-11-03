@@ -140,8 +140,11 @@ static Tcl_Obj *DbVersionInfo(Ns_DbHandle *handle);
 
 static Ns_TclTraceProc DbInterpInit;
 static TCL_OBJCMDPROC_T DbObjCmd;
-static int DbStats(Tcl_Interp *interp, Ns_DbHandle *handle, const char *database)
-    NS_GNUC_NONNULL(1, 2, 3);
+#ifdef NS_DB_STATS_ABI
+static Ns_DbStatsProc DbStats NS_GNUC_NONNULL(1, 2);
+#endif
+static int DbStatsCollect(Tcl_Interp *interp, Ns_DbHandle *handle, const char *database, bool legacy)
+    NS_GNUC_NONNULL(1, 2);
 
 #ifdef NS_DB_BATCH_ABI
 static Ns_DbBatchDriverProc DbBatchOps;
@@ -306,6 +309,9 @@ static Ns_DbProc dbProcs[] = {
 #endif
 #ifdef NS_DB_BIND_PARAMETER_ABI
     { DbFn_BindParameter, (ns_funcptr_t)DbBindParameter },
+#endif
+#ifdef NS_DB_STATS_ABI
+    { DbFn_Stats,        (ns_funcptr_t)DbStats },
 #endif
     { DbFn_BindRow,      (ns_funcptr_t)DbBindRow },
     { DbFn_SpStart,      (ns_funcptr_t)DbSpStart },
@@ -1858,131 +1864,249 @@ DbSpExec(Ns_DbHandle *handle)
  *
  * DbStats --
  *
- *      Read connection and pending-statement counters without resetting them.
- *      Inspect WAL progress for one database using a NOOP checkpoint. This
- *      never copies frames or changes automatic checkpoint configuration.
+ *      Implement the shared statistics vocabulary for ns_db stats.
  *
  * Results:
- *      Standard Tcl result containing connection, statement and WAL dictionaries.
+ *      TCL_OK with flat, available metrics and SQLite-specific data grouped
+ *      under backend/sqlite, or TCL_ERROR for invalid handles/databases.
  *
  * Side effects:
- *      WAL availability and SQLite result codes are included in the snapshot.
- *      No checkpoint is forced and no statistics are reset.
- *      Pending results, affected-row counts and driver diagnostics are retained.
+ *      Read counters without resetting them or changing application state.
+ *
+ *----------------------------------------------------------------------
+ */
+#ifdef NS_DB_STATS_ABI
+static int
+DbStats(Tcl_Interp *interp, Ns_DbHandle *handle, const char *database)
+{
+    return DbStatsCollect(interp, handle, database, NS_FALSE);
+}
+#endif
+
+/*
+ *----------------------------------------------------------------------
+ *
+ * DbStatsCollect --
+ *
+ *      Sample once for either the shared nsdb format or the legacy SQLite
+ *      format. Counter scope and units are explicit in the mapping below.
+ *      Preserve ns_sqlite stats names, wrappers and unavailable sentinels.
+ *
+ * Results:
+ *      TCL_OK with a dictionary, or TCL_ERROR. Generic unavailable metrics
+ *      and empty groups are omitted; measured zero values remain present.
+ *
+ * Side effects:
+ *      Read policy PRAGMAs and inspect WAL progress with CHECKPOINT_NOOP.
+ *      Never reset counters, fetch rows, perform a checkpoint or clear errors.
  *
  *----------------------------------------------------------------------
  */
 static int
-DbStats(Tcl_Interp *interp, Ns_DbHandle *handle, const char *database)
+DbStatsCollect(Tcl_Interp *interp, Ns_DbHandle *handle, const char *database, bool legacy)
 {
+    typedef enum {
+        StatCurrent, StatPeakCounter, StatSlots, StatPredicate
+    } StatValue;
     static const struct {
+        const char *legacyName;
         const char *name;
         int         operation;
+        bool        shared;
+        StatValue   value;
     } connectionStats[] = {
-        {"cacheUsedBytes",       SQLITE_DBSTATUS_CACHE_USED},
-        {"cacheUsedSharedBytes", SQLITE_DBSTATUS_CACHE_USED_SHARED},
-        {"cacheHits",            SQLITE_DBSTATUS_CACHE_HIT},
-        {"cacheMisses",          SQLITE_DBSTATUS_CACHE_MISS},
-        {"cacheWrites",          SQLITE_DBSTATUS_CACHE_WRITE},
-        {"cacheSpills",          SQLITE_DBSTATUS_CACHE_SPILL},
-        {"schemaUsedBytes",      SQLITE_DBSTATUS_SCHEMA_USED},
-        {"statementUsedBytes",   SQLITE_DBSTATUS_STMT_USED},
-        {"deferredForeignKeys",  SQLITE_DBSTATUS_DEFERRED_FKS},
-        {"lookasideUsed",        SQLITE_DBSTATUS_LOOKASIDE_USED},
-        {"lookasideHits",        SQLITE_DBSTATUS_LOOKASIDE_HIT},
-        {"lookasideMissSize",    SQLITE_DBSTATUS_LOOKASIDE_MISS_SIZE},
-        {"lookasideMissFull",    SQLITE_DBSTATUS_LOOKASIDE_MISS_FULL},
-        {"tempBufferSpillBytes", SQLITE_DBSTATUS_TEMPBUF_SPILL}
+        {"cacheUsedBytes",        "cacheUsedBytes",         SQLITE_DBSTATUS_CACHE_USED,        NS_TRUE,  StatCurrent},
+        {"cacheUsedSharedBytes",  "cacheUsedSharedBytes",   SQLITE_DBSTATUS_CACHE_USED_SHARED, NS_FALSE, StatCurrent},
+        {"cacheHits",             "cacheHits",              SQLITE_DBSTATUS_CACHE_HIT,         NS_TRUE,  StatCurrent},
+        {"cacheMisses",           "cacheMisses",            SQLITE_DBSTATUS_CACHE_MISS,        NS_TRUE,  StatCurrent},
+        {"cacheWrites",           "cacheWrittenPages",      SQLITE_DBSTATUS_CACHE_WRITE,       NS_FALSE, StatCurrent},
+        {"cacheSpills",           "cacheSpilledPages",      SQLITE_DBSTATUS_CACHE_SPILL,       NS_FALSE, StatCurrent},
+        {"schemaUsedBytes",       "schemaUsedBytes",        SQLITE_DBSTATUS_SCHEMA_USED,       NS_FALSE, StatCurrent},
+        {"statementUsedBytes",    "statementsUsedBytes",    SQLITE_DBSTATUS_STMT_USED,         NS_FALSE, StatCurrent},
+        {"deferredForeignKeys",   "hasUnresolvedForeignKeys", SQLITE_DBSTATUS_DEFERRED_FKS,      NS_FALSE, StatPredicate},
+        {"lookasideUsed",         "lookasideUsedSlots",     SQLITE_DBSTATUS_LOOKASIDE_USED,    NS_FALSE, StatSlots},
+        {"lookasideHits",         "lookasideHits",          SQLITE_DBSTATUS_LOOKASIDE_HIT,     NS_FALSE, StatPeakCounter},
+        {"lookasideMissSize",     "lookasideSizeMisses",    SQLITE_DBSTATUS_LOOKASIDE_MISS_SIZE, NS_FALSE, StatPeakCounter},
+        {"lookasideMissFull",     "lookasideFullMisses",    SQLITE_DBSTATUS_LOOKASIDE_MISS_FULL, NS_FALSE, StatPeakCounter},
+        {"tempBufferSpillBytes",  "temporarySpillBytes",    SQLITE_DBSTATUS_TEMPBUF_SPILL,      NS_FALSE, StatCurrent}
     };
     static const struct {
+        const char *legacyName;
         const char *name;
         int         operation;
+        bool        shared;
     } statementStats[] = {
-        {"fullscanSteps", SQLITE_STMTSTATUS_FULLSCAN_STEP},
-        {"sorts",         SQLITE_STMTSTATUS_SORT},
-        {"autoindexRows", SQLITE_STMTSTATUS_AUTOINDEX},
-        {"vmSteps",       SQLITE_STMTSTATUS_VM_STEP},
-        {"reprepares",    SQLITE_STMTSTATUS_REPREPARE},
-        {"runs",          SQLITE_STMTSTATUS_RUN},
-        {"memoryBytes",   SQLITE_STMTSTATUS_MEMUSED}
+        {"fullscanSteps", "fullScanSteps",       SQLITE_STMTSTATUS_FULLSCAN_STEP, NS_FALSE},
+        {"sorts",         "sortOperations",      SQLITE_STMTSTATUS_SORT,          NS_FALSE},
+        {"autoindexRows", "automaticIndexRows",  SQLITE_STMTSTATUS_AUTOINDEX,     NS_FALSE},
+        {"vmSteps",       "vmSteps",             SQLITE_STMTSTATUS_VM_STEP,       NS_FALSE},
+        {"reprepares",    "recompilations",      SQLITE_STMTSTATUS_REPREPARE,     NS_FALSE},
+        {"runs",          "executions",          SQLITE_STMTSTATUS_RUN,           NS_TRUE},
+        {"memoryBytes",   "memoryUsedBytes",     SQLITE_STMTSTATUS_MEMUSED,       NS_TRUE}
     };
-    Connection    *connection = handle->connection;
-    Context       *context = handle->statement;
-    Tcl_Obj       *result, *counters, *statement, *wal;
-    int            logFrames = -1, checkpointedFrames = -1, rc;
-    size_t         i;
+    Connection *connection = handle->connection;
+    Context    *context = handle->statement;
+    Tcl_Obj    *result, *counters, *statement, *policy, *wal;
+    Tcl_Obj    *backend = NULL, *sqlite = NULL, *specific = NULL;
+    int         logFrames = -1, checkpointedFrames = -1, rc;
 
+    if (!handle->connected || connection == NULL) {
+        Tcl_SetObjResult(interp, Tcl_NewStringObj("statistics require a connected database handle", TCL_INDEX_NONE));
+#ifdef NS_DB_STATS_ABI
+        Tcl_SetErrorCode(interp, "NSDB", "STATS", "DISCONNECTED", (char *)0L);
+#endif
+        return TCL_ERROR;
+    }
+    if (database == NULL) {
+        database = "main";
+    }
     if (*database == '\0' || sqlite3_db_readonly(connection->db, database) < 0) {
         Tcl_SetObjResult(interp, Tcl_ObjPrintf("unknown SQLite database \"%s\"", database));
         return TCL_ERROR;
     }
-
     result = Tcl_NewDictObj();
     counters = Tcl_NewDictObj();
-    statement = Tcl_NewDictObj();
-    wal = Tcl_NewDictObj();
+    policy = Tcl_NewDictObj();
     Tcl_DictObjPut(NULL, result, NEW_LITERAL_OBJ("connection"), counters);
-    Tcl_DictObjPut(NULL, result, NEW_LITERAL_OBJ("statement"), statement);
-    Tcl_DictObjPut(NULL, result, NEW_LITERAL_OBJ("wal"), wal);
-    {
-        Tcl_Obj *policy = Tcl_NewDictObj();
+    if (legacy) {
+        Tcl_DictObjPut(NULL, result, NEW_LITERAL_OBJ("policy"), policy);
+#ifdef NS_DB_STATS_ABI
+        /* Retain the additive metadata already supplied by the former alias. */
+        Tcl_DictObjPut(NULL, result, NEW_LITERAL_OBJ("driver"), NEW_LITERAL_OBJ("sqlite"));
+        Tcl_DictObjPut(NULL, result, NEW_LITERAL_OBJ("supported"), Tcl_NewBooleanObj(NS_TRUE));
+#endif
+    } else {
+        backend = Tcl_NewDictObj();
+        sqlite = Tcl_NewDictObj();
+        specific = Tcl_NewDictObj();
+        Tcl_DictObjPut(NULL, result, NEW_LITERAL_OBJ("backend"), backend);
+        Tcl_DictObjPut(NULL, backend, NEW_LITERAL_OBJ("sqlite"), sqlite);
+        Tcl_DictObjPut(NULL, sqlite, NEW_LITERAL_OBJ("connection"), specific);
+        Tcl_DictObjPut(NULL, sqlite, NEW_LITERAL_OBJ("policy"), policy);
+    }
+    for (size_t i = 0; i < PolicyCount; i++) {
+        sqlite3_int64 value;
 
-        for (size_t j = 0; j < PolicyCount; j++) {
-            sqlite3_int64 value;
+        if (DbPoolPolicyValue(connection->db, (PolicyIndex)i, &value) == SQLITE_OK) {
+            const char *key = i == PolicyCache ? "cacheSize" : policySpecs[i].key;
+            Tcl_Obj    *obj;
 
-            if (DbPoolPolicyValue(connection->db, (PolicyIndex)j, &value) == SQLITE_OK) {
-                const char *key = j == PolicyCache ? "cacheSize" : policySpecs[j].key;
-                Tcl_Obj    *obj;
-
-                if (policySpecs[j].names != NULL) {
-                    obj = Tcl_NewStringObj(policySpecs[j].names[(size_t)value], -1);
-                } else {
-                    obj = Tcl_NewWideIntObj((Tcl_WideInt)value);
-                }
-                Tcl_DictObjPut(NULL, policy, Tcl_NewStringObj(key, -1), obj);
-                if (j == PolicySynchronous) {
-                    Tcl_DictObjPut(NULL, policy, NEW_LITERAL_OBJ("synchronousValue"),
-                                    Tcl_NewWideIntObj((Tcl_WideInt)value));
-                }
+            if (policySpecs[i].names != NULL) {
+                obj = Tcl_NewStringObj(policySpecs[i].names[(size_t)value], TCL_INDEX_NONE);
+            } else {
+                obj = Tcl_NewWideIntObj((Tcl_WideInt)value);
+            }
+            Tcl_DictObjPut(NULL, policy, Tcl_NewStringObj(key, TCL_INDEX_NONE), obj);
+            if (i == PolicySynchronous) {
+                Tcl_DictObjPut(NULL, policy, NEW_LITERAL_OBJ("synchronousValue"), Tcl_NewWideIntObj((Tcl_WideInt)value));
             }
         }
-        Tcl_DictObjPut(NULL, result, NEW_LITERAL_OBJ("policy"), policy);
     }
-
-
-    for (i = 0u; i < sizeof(connectionStats) / sizeof(connectionStats[0]); i++) {
+    for (size_t i = 0; i < sizeof(connectionStats) / sizeof(connectionStats[0]); i++) {
         sqlite3_int64 current = 0, highwater = 0;
-        Tcl_Obj     *counter = Tcl_NewDictObj();
 
-        rc = sqlite3_db_status64(connection->db, connectionStats[i].operation,
-                                 &current, &highwater, 0);
-        Tcl_DictObjPut(NULL, counter, NEW_LITERAL_OBJ("available"), Tcl_NewBooleanObj(rc == SQLITE_OK));
-        if (rc == SQLITE_OK) {
-            Tcl_DictObjPut(NULL, counter, NEW_LITERAL_OBJ("current"), Tcl_NewWideIntObj((Tcl_WideInt)current));
-            Tcl_DictObjPut(NULL, counter, NEW_LITERAL_OBJ("highwater"), Tcl_NewWideIntObj((Tcl_WideInt)highwater));
+        rc = sqlite3_db_status64(connection->db, connectionStats[i].operation, &current, &highwater, 0);
+        if (legacy) {
+            Tcl_Obj *counter = Tcl_NewDictObj();
+
+            Tcl_DictObjPut(NULL, counter, NEW_LITERAL_OBJ("available"), Tcl_NewBooleanObj(rc == SQLITE_OK));
+            if (rc == SQLITE_OK) {
+                Tcl_DictObjPut(NULL, counter, NEW_LITERAL_OBJ("current"), Tcl_NewWideIntObj((Tcl_WideInt)current));
+                Tcl_DictObjPut(NULL, counter, NEW_LITERAL_OBJ("highwater"), Tcl_NewWideIntObj((Tcl_WideInt)highwater));
+            }
+            Tcl_DictObjPut(NULL, counters, Tcl_NewStringObj(connectionStats[i].legacyName, TCL_INDEX_NONE), counter);
+        } else if (rc == SQLITE_OK) {
+            Tcl_Obj *target = connectionStats[i].shared ? counters : specific;
+            Tcl_Obj *value;
+
+            if (connectionStats[i].value == StatPeakCounter) {
+                current = highwater;
+            }
+            value = connectionStats[i].value == StatPredicate
+                ? Tcl_NewBooleanObj(current != 0) : Tcl_NewWideIntObj((Tcl_WideInt)current);
+            Tcl_DictObjPut(NULL, target, Tcl_NewStringObj(connectionStats[i].name, TCL_INDEX_NONE), value);
+            if (connectionStats[i].value == StatSlots) {
+                Tcl_Obj *peak = Tcl_NewDictObj(), *peakBackend = Tcl_NewDictObj();
+                Tcl_Obj *peakSqlite = Tcl_NewDictObj(), *peakConnection = Tcl_NewDictObj();
+
+                Tcl_DictObjPut(NULL, peakConnection, NEW_LITERAL_OBJ("lookasideUsedSlots"), Tcl_NewWideIntObj((Tcl_WideInt)highwater));
+                Tcl_DictObjPut(NULL, peakSqlite, NEW_LITERAL_OBJ("connection"), peakConnection);
+                Tcl_DictObjPut(NULL, peakBackend, NEW_LITERAL_OBJ("sqlite"), peakSqlite);
+                Tcl_DictObjPut(NULL, peak, NEW_LITERAL_OBJ("backend"), peakBackend);
+                Tcl_DictObjPut(NULL, result, NEW_LITERAL_OBJ("highwater"), peak);
+            }
         }
-        Tcl_DictObjPut(NULL, counters, Tcl_NewStringObj(connectionStats[i].name, TCL_INDEX_NONE), counter);
     }
+    if (legacy || (context != NULL && context->stmt != NULL)) {
+        statement = Tcl_NewDictObj();
+        Tcl_DictObjPut(NULL, result, NEW_LITERAL_OBJ("statement"), statement);
+        if (legacy) {
+            Tcl_DictObjPut(NULL, statement, NEW_LITERAL_OBJ("available"),
+                           Tcl_NewBooleanObj(context != NULL && context->stmt != NULL));
+        }
+        if (context != NULL && context->stmt != NULL) {
+            Tcl_Obj *engineStatement = NULL;
 
-    Tcl_DictObjPut(NULL, statement, NEW_LITERAL_OBJ("available"),
-                   Tcl_NewBooleanObj(context != NULL && context->stmt != NULL));
-    if (context != NULL && context->stmt != NULL) {
-        for (i = 0u; i < sizeof(statementStats) / sizeof(statementStats[0]); i++) {
-            int value = sqlite3_stmt_status(context->stmt, statementStats[i].operation, 0);
+            if (!legacy) {
+                engineStatement = Tcl_NewDictObj();
+                Tcl_DictObjPut(NULL, sqlite, NEW_LITERAL_OBJ("statement"), engineStatement);
+                Tcl_DictObjPut(NULL, statement, NEW_LITERAL_OBJ("rowsReturned"),
+                               Tcl_NewWideIntObj(context->ncolumns > 0 ? (Tcl_WideInt)connection->nrows : 0));
+            }
+            for (size_t i = 0; i < sizeof(statementStats) / sizeof(statementStats[0]); i++) {
+                int value = sqlite3_stmt_status(context->stmt, statementStats[i].operation, 0);
+                Tcl_Obj *target = legacy || statementStats[i].shared ? statement : engineStatement;
+                const char *name = legacy ? statementStats[i].legacyName : statementStats[i].name;
 
-            Tcl_DictObjPut(NULL, statement, Tcl_NewStringObj(statementStats[i].name, TCL_INDEX_NONE),
-                           Tcl_NewWideIntObj((Tcl_WideInt)value));
+                Tcl_DictObjPut(NULL, target, Tcl_NewStringObj(name, TCL_INDEX_NONE), Tcl_NewWideIntObj((Tcl_WideInt)value));
+            }
         }
     }
+    rc = sqlite3_wal_checkpoint_v2(connection->db, database, SQLITE_CHECKPOINT_NOOP, &logFrames, &checkpointedFrames);
+    if (legacy || rc != SQLITE_OK || (logFrames >= 0 && checkpointedFrames >= 0)) {
+        wal = Tcl_NewDictObj();
+        Tcl_DictObjPut(NULL, legacy ? result : sqlite, NEW_LITERAL_OBJ("wal"), wal);
+        Tcl_DictObjPut(NULL, wal, NEW_LITERAL_OBJ("database"), Tcl_NewStringObj(database, TCL_INDEX_NONE));
+        if (legacy || rc != SQLITE_OK) {
+            Tcl_DictObjPut(NULL, wal, NEW_LITERAL_OBJ("resultCode"), Tcl_NewIntObj(rc));
+        }
+        if (legacy) {
+            Tcl_DictObjPut(NULL, wal, NEW_LITERAL_OBJ("available"),
+                           Tcl_NewBooleanObj(rc == SQLITE_OK && logFrames >= 0 && checkpointedFrames >= 0));
+        } else if (rc != SQLITE_OK) {
+            Tcl_DictObjPut(NULL, wal, NEW_LITERAL_OBJ("reason"), Tcl_NewStringObj(sqlite3_errstr(rc), TCL_INDEX_NONE));
+        }
+        if (legacy || (rc == SQLITE_OK && logFrames >= 0 && checkpointedFrames >= 0)) {
+            Tcl_DictObjPut(NULL, wal, NEW_LITERAL_OBJ("logFrames"), Tcl_NewIntObj(logFrames));
+            Tcl_DictObjPut(NULL, wal, NEW_LITERAL_OBJ("checkpointedFrames"), Tcl_NewIntObj(checkpointedFrames));
+        }
+    }
+    if (!legacy) {
+        const struct {
+            Tcl_Obj    *parent;
+            Tcl_Obj    *child;
+            const char *name;
+        } groups[] = {
+            {result, counters, "connection"},
+            {sqlite, specific, "connection"},
+            {sqlite, policy, "policy"},
+            {result, sqlite, "backend"}
+        };
 
-    rc = sqlite3_wal_checkpoint_v2(connection->db, database, SQLITE_CHECKPOINT_NOOP,
-                                  &logFrames, &checkpointedFrames);
-    Tcl_DictObjPut(NULL, wal, NEW_LITERAL_OBJ("database"), Tcl_NewStringObj(database, TCL_INDEX_NONE));
-    Tcl_DictObjPut(NULL, wal, NEW_LITERAL_OBJ("resultCode"), Tcl_NewIntObj(rc));
-    Tcl_DictObjPut(NULL, wal, NEW_LITERAL_OBJ("available"),
-                   Tcl_NewBooleanObj(rc == SQLITE_OK && logFrames >= 0 && checkpointedFrames >= 0));
-    Tcl_DictObjPut(NULL, wal, NEW_LITERAL_OBJ("logFrames"), Tcl_NewIntObj(logFrames));
-    Tcl_DictObjPut(NULL, wal, NEW_LITERAL_OBJ("checkpointedFrames"), Tcl_NewIntObj(checkpointedFrames));
+        /* Do not create empty capability placeholders in the shared format. */
+        for (size_t i = 0; i < sizeof(groups) / sizeof(groups[0]); i++) {
+            TCL_SIZE_T count;
+
+            Tcl_DictObjSize(NULL, groups[i].child, &count);
+            if (count == 0) {
+                Tcl_Obj *key = Tcl_NewStringObj(groups[i].name, TCL_INDEX_NONE);
+
+                Tcl_IncrRefCount(key);
+                Tcl_DictObjRemove(NULL, groups[i].parent, key);
+                Tcl_DecrRefCount(key);
+            }
+        }
+    }
     Tcl_SetObjResult(interp, result);
     return TCL_OK;
 }
@@ -2036,7 +2160,7 @@ DbObjCmd(ClientData UNUSED(clientData), Tcl_Interp *interp, TCL_SIZE_T objc, Tcl
     }
 
     if (opt == IStatsIdx) {
-        const char *database = "main";
+        const char *database = NULL;
         Ns_ObjvSpec options[] = {
             {"-database", Ns_ObjvString, &database, NULL},
             {NULL, NULL, NULL, NULL}
@@ -2045,7 +2169,7 @@ DbObjCmd(ClientData UNUSED(clientData), Tcl_Interp *interp, TCL_SIZE_T objc, Tcl
         if (Ns_ParseObjv(options, NULL, interp, 3, objc, objv) != NS_OK) {
             return TCL_ERROR;
         }
-        return DbStats(interp, handle, database);
+        return DbStatsCollect(interp, handle, database, NS_TRUE);
     }
 
     /* Existing subcommands accept only the validated handle. */

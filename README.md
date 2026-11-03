@@ -209,23 +209,27 @@ SQLite 3.53.4 is reported as `3053004`.
 also logs the driver version, runtime SQLite version, and compile-time header
 version. Inspecting versions does not execute SQL or alter results or counts.
 
-## SQLite statistics
+## Legacy SQLite statistics
 
 ```tcl
 ns_sqlite stats $handle
-ns_sqlite stats $handle -database nsmcp_records
+ns_sqlite stats $handle -database attached_database
 ```
 
-The command returns a dictionary with `connection`, `statement` and `wal`
-sections. `-database` selects the attached database for the WAL snapshot and
-otherwise defaults to `main`. The name must identify an attached database; an
-empty or unknown name is an error. Connection counters always cover the entire
-connection, including its attached databases, regardless of this option.
+This compatibility interface retains its existing `connection`, `statement`,
+`wal` and `policy` dictionaries, counter `{available current highwater}` wrappers,
+statement availability flag, and WAL `available`, `resultCode` and `-1` sentinels.
+When compiled against the new core, the additive `driver`/`supported` fields also
+remain. Existing names and value representations are unchanged.
 
-Statistics are read directly from SQLite. This command executes no SQL, resets
-no counters, does not consume or finalize pending results, and does not change
-caller-owned transactions or driver affected-row counts. It does not force a
-checkpoint or change the automatic checkpoint policy.
+`-database` selects the attached database for the WAL snapshot and defaults to
+`main`. Unknown or empty names are errors. Connection counters cover the whole
+connection, regardless of this option. Policy describes the main pool datasource.
+
+Statistics use engine counters and read-only policy PRAGMAs without fetching or
+finalizing pending results, resetting counters, changing affected-row counts or
+owning application transactions. WAL sampling uses CHECKPOINT_NOOP and does not
+copy frames, force a checkpoint or change automatic checkpoint policy.
 
 ### Connection counters
 
@@ -527,3 +531,62 @@ size and application recovery requirements must be chosen separately. Zero
 checkpoint threshold requires an application/administrative checkpoint strategy.
 Changing configuration takes effect on reconnect/reset; restart for consistent
 policies across all worker interpreters and handles.
+
+
+## Shared per-handle statistics
+
+```tcl
+ns_db stats $handle
+ns_db stats $handle -database main
+```
+
+The optional `DbFn_Stats` callback returns the shared vocabulary below, with
+`driver sqlite` and `supported true` supplied by core. All metric values are
+scalars. Missing means unsupported or unavailable; zero remains a measured zero.
+Empty groups are omitted. There are no per-counter or per-group `available`
+wrappers in this interface. A supported callback need not provide every metric.
+
+| Shared path | SQLite measurement | Scope |
+| --- | --- | --- |
+| connection cacheUsedBytes | SQLITE_DBSTATUS_CACHE_USED | Current pager-cache bytes across this connection |
+| connection cacheHits / cacheMisses | SQLITE_DBSTATUS_CACHE_HIT / CACHE_MISS | Cumulative pager-cache accesses |
+| statement executions | SQLITE_STMTSTATUS_RUN | Execution starts of the retained statement |
+| statement rowsReturned | Driver fetch counter | Rows delivered so far; zero for statements without result columns |
+| statement memoryUsedBytes | SQLITE_STMTSTATUS_MEMUSED | Current prepared-statement memory |
+
+SQLite does not supply a total connection `memoryUsedBytes` measurement, so it
+is omitted. Do not substitute process-wide SQLite memory totals. Statement
+groups disappear once the statement is finalized, rather than retaining a
+historical statement snapshot.
+
+SQLite-specific measurements live under `backend sqlite`:
+
+| Group | Fields | Meaning |
+| --- | --- | --- |
+| connection | cacheUsedSharedBytes, schemaUsedBytes, statementsUsedBytes | Current bytes, with SQLite's shared-cache accounting |
+| connection | cacheWrittenPages, cacheSpilledPages | Cumulative pager page writes and writes caused by cache overflow |
+| connection | temporarySpillBytes | Cumulative temporary-file spill bytes |
+| connection | hasUnresolvedForeignKeys | Boolean, not an inferred constraint count |
+| connection | lookasideUsedSlots | Current allocated lookaside slots |
+| connection | lookasideHits, lookasideSizeMisses, lookasideFullMisses | Cumulative allocation attempts, using SQLite's highwater API output |
+| statement | fullScanSteps, sortOperations, automaticIndexRows, vmSteps, recompilations | SQLite statement-instance counters, not server scan statistics |
+| policy | Existing pool policy names | Effective main-datasource/connection settings, as in the legacy interface |
+| wal | database, logFrames, checkpointedFrames | NOOP snapshot for the selected WAL database |
+
+Only the lookaside-used gauge has a meaningful peak in the exposed connection
+API. It appears at `highwater backend sqlite connection lookasideUsedSlots`.
+SQLite's always-zero cache/memory highwater outputs are omitted. Lookaside hit
+and miss totals are ordinary counters, not peak gauges.
+
+For a non-WAL database, the WAL group is absent. A temporarily blocked or failed
+WAL sample retains `database`, `resultCode` and `reason` under `backend sqlite wal`,
+but omits frame counts. A successful sample retains measured zero frame counts
+and omits redundant success flags. Connection counters and main-pool policy are
+not restricted by the WAL database selector.
+
+`ns_sqlite stats` uses the same sampling implementation but preserves the legacy
+result contract; applications can migrate explicitly to the shared names.
+Callback registration is conditional on `NS_DB_STATS_ABI`. Compiling against
+older core headers retains the legacy command without requiring a new core
+symbol. Older drivers on the new core report `supported false`. The no-handle
+`ns_db stats` pool statistics are unchanged.
