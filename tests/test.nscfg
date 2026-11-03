@@ -66,8 +66,6 @@ ns_section ns/db/pool/policies {
     ns_param driver sqlite
     ns_param connections 2
     ns_param datasource $home/policies.db
-}
-ns_section ns/db/pool/policies/sqlite {
     ns_param journalMode WAL
     ns_param synchronous NORMAL
     ns_param walAutoCheckpointPages 4000
@@ -86,7 +84,5 @@ ns_section ns/db/pool/unavailable-policy {
     ns_param driver sqlite
     ns_param connections 1
     ns_param datasource :memory:
-}
-ns_section ns/db/pool/unavailable-policy/sqlite {
     ns_param journalMode WAL
 }

@@ -498,7 +498,10 @@ for VALUES expansion instead; their existing semantics are unchanged.
 
 ### Per-pool connection policy
 
-Configure SQLite policies in `ns/db/pool/POOL/sqlite`. This driver applies them
+Configure SQLite policies directly in `ns/db/pool/POOL`, alongside `driver`,
+`datasource` and `connections`. There is no separate `/sqlite` policy subsection.
+Core nsdb reads its parameters and the selected driver reads its additional
+parameters from the same section. This driver applies policies
 when opening a native connection and restores them when its handle returns to
 the pool. Applications select a pool and keep their own retention/schema/budget
 settings; they need not issue baseline PRAGMAs. Policies address the primary

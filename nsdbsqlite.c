@@ -1244,7 +1244,7 @@ DbPoolPolicyRead(const char *pool, PoolPolicy *policy)
     if (pool == NULL) {
         return NS_OK;
     }
-    section = Ns_ConfigGetPath(NULL, NULL, "db", "pool", pool, "sqlite", NS_SENTINEL);
+    section = Ns_ConfigGetPath(NULL, NULL, "db", "pool", pool, NS_SENTINEL);
     for (size_t i = 0; i < PolicyCount; i++) {
         const PolicySpec *spec = &policySpecs[i];
         const char       *text = Ns_ConfigGetValue(section, spec->key);

@@ -48,7 +48,7 @@ foreach {key value} {
     journalSizeLimitBytes -2
 } {
     test sqlite-pool-policy-invalid-$key {invalid policy is rejected before opening the datasource} -body {
-        set section [ns_configsection ns/db/pool/policies/sqlite]
+        set section [ns_configsection ns/db/pool/policies]
         set old [ns_set get $section $key]
         ns_db bouncepool policies
         ns_set update $section $key $value
@@ -68,7 +68,7 @@ test sqlite-pool-policy-unavailable {an unsupported requested journal mode fails
 foreach journal {DELETE WAL TRUNCATE PERSIST} {
     foreach {sync level} {OFF 0 NORMAL 1 FULL 2 EXTRA 3} {
         test sqlite-pool-policy-$journal-$sync {journal and synchronization modes are case-insensitive and effective} -body {
-            set section [ns_configsection ns/db/pool/policies/sqlite]
+            set section [ns_configsection ns/db/pool/policies]
             ns_db bouncepool policies
             ns_set update $section journalMode [string tolower $journal]
             ns_set update $section synchronous [string tolower $sync]
@@ -89,7 +89,7 @@ foreach journal {DELETE WAL TRUNCATE PERSIST} {
 
 
 test sqlite-pool-policy-reset-failure {a failed reset closes the native connection and preserves committed data} -body {
-    set section [ns_configsection ns/db/pool/policies/sqlite]
+    set section [ns_configsection ns/db/pool/policies]
     set db [ns_db gethandle policies]
     ns_db dml $db {CREATE TABLE IF NOT EXISTS policy_preserved(v)}
     ns_db dml $db {INSERT INTO policy_preserved VALUES(42)}
