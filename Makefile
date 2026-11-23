@@ -17,6 +17,13 @@ MODOBJS    = nsdbsqlite.o
 MODLIBS    += -lnsdb
 UNIXOBJS   = sqlite3.o
 
+# Build scan-status support by default. Per-pool policy controls runtime
+# collection, which remains disabled unless explicitly requested.
+SQLITE_STMT_SCANSTATUS ?= 1
+ifeq ($(SQLITE_STMT_SCANSTATUS),1)
+nsdbsqlite.o sqlite3.o: CFLAGS += -DSQLITE_ENABLE_STMT_SCANSTATUS
+endif
+
 include  $(NAVISERVER)/include/Makefile.module
 
 # Keep the upstream SQLite amalgamation on baseline warnings. Retain all

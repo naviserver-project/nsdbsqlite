@@ -518,8 +518,18 @@ Unspecified options retain SQLite defaults (including a file's persistent WAL mo
 | tempStore | DEFAULT, FILE, MEMORY | Temporary storage policy |
 | mmapSizeBytes | 0..9223372036854775807 | Memory map limit in bytes |
 | journalSizeLimitBytes | -1..9223372036854775807 | Retained journal/WAL size limit |
+| statementScanStatus | Tcl boolean | Collect SQLite statement scan-status counters on this pool |
 
 Names are case-insensitive. Numeric values are integer counts, not unit strings.
+`statementScanStatus` defaults to false. It requires a build with
+`SQLITE_STMT_SCANSTATUS=1`; otherwise the driver logs a warning at startup and
+ignores a true setting. `ns_sqlite stats $handle` reports both
+`statementScanStatusSupported` and the effective `statementScanStatus` state.
+When enabled, completed statements emit bounded scan details under
+`Debug(sqlite-scan)` if that severity is enabled. The log includes a SQL
+fingerprint, elapsed time, rows returned, rows visited and per-plan-element
+loop counts; SQL text and bound values are not logged. Use
+`ns_logctl severity Debug(sqlite-scan) true` to enable these entries.
 Invalid values fail before opening a datasource. Unsupported or clamped values
 fail effective-value verification rather than silently selecting another policy.
 `ns_sqlite stats $handle` reports a `policy` dictionary; `cacheSize` is SQLite's

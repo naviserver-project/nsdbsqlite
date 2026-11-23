@@ -38,6 +38,8 @@
 NS_EXPORT int   Ns_ModuleVersion = 1;
 NS_EXPORT NsDb_DriverInitProc Ns_DbDriverInit;
 
+static Ns_LogSeverity SqliteScanDebugSeverity;
+
 #if defined(NS_MODULE_INFO_VERSION) && defined(NS_MODULE_TAG)
 NS_EXPORT Ns_ModuleInfoProc Ns_ModuleGetInfo;
 /* Provide module build and ABI information for runtime introspection. */
@@ -57,6 +59,7 @@ typedef struct {
     sqlite3       *db;
     sqlite3_int64  nrows;
     sqlite3_int64  affected;
+    bool           statementScanStatus;
 } Connection;
 
 typedef struct {
@@ -64,6 +67,9 @@ typedef struct {
     sqlite3_int64   totalBefore;
     sqlite3_stmt   *stmt;
     bool            spPending;
+    bool            scanStatus;
+    bool            scanStatusLogged;
+    Ns_Time         scanStartedAt;
 } Context;
 
 /*
@@ -87,6 +93,7 @@ typedef struct {
 typedef struct {
     bool           configured[PolicyCount];
     sqlite3_int64  values[PolicyCount];
+    bool           statementScanStatus;
 } PoolPolicy;
 
 static const char *const journalNames[] = {"DELETE", "TRUNCATE", "PERSIST", "MEMORY", "WAL", "OFF", NULL};
@@ -119,6 +126,9 @@ static Ns_ReturnCode DbConfigureDatasources(const char *driver);
 static Ns_Set *DbBindRow(Ns_DbHandle *handle);
 static void DbError(Ns_DbHandle *handle, const char *operation);
 static Ns_ReturnCode DbCancel(Ns_DbHandle *handle);
+#ifdef SQLITE_ENABLE_STMT_SCANSTATUS
+static void DbScanStatusLog(Ns_DbHandle *handle, Context *contextPtr);
+#endif
 static int DbClose(Ns_DbHandle *handle);
 static int DbExec(Ns_DbHandle *handle, char *sql);
 static Ns_ReturnCode DbPrepare(Ns_DbHandle *handle, const char *sql);
@@ -1122,6 +1132,7 @@ DbBatchOps(void)
 NS_EXPORT Ns_ReturnCode
 Ns_DbDriverInit(const char *driver, const char *UNUSED(configPath))
 {
+    SqliteScanDebugSeverity = Ns_CreateLogSeverity("Debug(sqlite-scan)");
     if (driver == NULL) {
         Ns_Log(Bug, "nsdbsqlite: Ns_DbDriverInit() called with NULL driver name.");
         return NS_ERROR;
@@ -1165,6 +1176,12 @@ DbConfigureDatasources(const char *driver)
             if (DbPoolPolicyRead(Ns_SetKey(pools, i), &policy) != NS_OK) {
                 return NS_ERROR;
             }
+#ifndef SQLITE_ENABLE_STMT_SCANSTATUS
+            if (policy.statementScanStatus) {
+                Ns_Log(Warning, "nsdbsqlite: pool '%s' requests statementScanStatus, but SQLite was built without scan-status support; setting ignored",
+                       Ns_SetKey(pools, i));
+            }
+#endif
         }
         source = Ns_ConfigGetValue(section, "datasource");
         /* Missing datasources are rejected by nsdb. Preserve SQLite's special
@@ -1279,6 +1296,23 @@ DbPoolPolicyRead(const char *pool, PoolPolicy *policy)
         policy->configured[i] = NS_TRUE;
         policy->values[i] = i == PolicyCache ? -(sqlite3_int64)value : (sqlite3_int64)value;
     }
+    {
+        const char *text = Ns_ConfigGetValue(section, "statementScanStatus");
+
+        if (text != NULL) {
+            Tcl_Obj *obj = Tcl_NewStringObj(text, -1);
+            int enabled;
+
+            Tcl_IncrRefCount(obj);
+            if (Tcl_GetBooleanFromObj(NULL, obj, &enabled) != TCL_OK) {
+                Tcl_DecrRefCount(obj);
+                Ns_Log(Error, "nsdbsqlite: invalid pool policy %s/statementScanStatus", section);
+                return NS_ERROR;
+            }
+            Tcl_DecrRefCount(obj);
+            policy->statementScanStatus = enabled != 0;
+        }
+    }
     return NS_OK;
 }
 
@@ -1391,6 +1425,23 @@ DbPoolPolicyApply(Ns_DbHandle *handle, const PoolPolicy *policy)
             return NS_ERROR;
         }
     }
+#ifdef SQLITE_ENABLE_STMT_SCANSTATUS
+    {
+        int enabled = 0;
+        int expected = policy->statementScanStatus ? 1 : 0;
+        int rc = sqlite3_db_config(db, SQLITE_DBCONFIG_STMT_SCANSTATUS, expected, &enabled);
+
+        if (rc != SQLITE_OK || enabled != expected) {
+            Ns_Log(Error, "nsdbsqlite: cannot apply pool '%s' SQLite policy 'statementScanStatus': %s",
+                   handle->poolname, sqlite3_errmsg(db));
+            Ns_DbSetException(handle, "NSDB", "SQLite pool policy could not be applied");
+            return NS_ERROR;
+        }
+        ((Connection *)handle->connection)->statementScanStatus = enabled != 0;
+    }
+#else
+    ((Connection *)handle->connection)->statementScanStatus = NS_FALSE;
+#endif
     return NS_OK;
 }
 
@@ -1545,6 +1596,10 @@ DbPrepare(Ns_DbHandle *handle, const char *sql)
     connectionPtr->nrows = 0;
     connectionPtr->affected = 0;
     contextPtr->totalBefore = sqlite3_total_changes64(connectionPtr->db);
+    contextPtr->scanStatus = connectionPtr->statementScanStatus;
+    if (contextPtr->scanStatus) {
+        Ns_GetTime(&contextPtr->scanStartedAt);
+    }
     handle->statement = contextPtr;
 
     rc = sqlite3_prepare_v2(connectionPtr->db, sql, -1, &contextPtr->stmt, &tail);
@@ -1586,6 +1641,12 @@ DbExecutePrepared(Ns_DbHandle *handle)
             connectionPtr->affected = sqlite3_changes64(db);
         }
         connectionPtr->nrows = connectionPtr->affected;
+#ifdef SQLITE_ENABLE_STMT_SCANSTATUS
+        if (contextPtr->scanStatus) {
+            DbScanStatusLog(handle, contextPtr);
+            contextPtr->scanStatusLogged = NS_TRUE;
+        }
+#endif
         return NS_DML;
     }
     handle->fetchingRows = NS_TRUE;
@@ -1728,6 +1789,12 @@ DbGetRow(Ns_DbHandle *handle, Ns_Set *row)
         if (sqlite3_total_changes64(connectionPtr->db) != contextPtr->totalBefore) {
             connectionPtr->affected = sqlite3_changes64(connectionPtr->db);
         }
+#ifdef SQLITE_ENABLE_STMT_SCANSTATUS
+        if (contextPtr->scanStatus) {
+            DbScanStatusLog(handle, contextPtr);
+            contextPtr->scanStatusLogged = NS_TRUE;
+        }
+#endif
         if (DbCancel(handle) != NS_OK) {
             return NS_ERROR;
         }
@@ -1801,6 +1868,107 @@ DbResetHandle(Ns_DbHandle *handle)
 }
 
 
+#ifdef SQLITE_ENABLE_STMT_SCANSTATUS
+/*
+ * Log bounded runtime scan information without exposing SQL text or bound values.
+ * The caller invokes this before finalizing the statement.
+ */
+static void
+DbScanStatusLog(Ns_DbHandle *handle, Context *contextPtr)
+{
+    enum { MaxScanStatusNodes = 32 };
+    Tcl_DString scans;
+    Ns_Time endTime, elapsed = {0, 0};
+    const char *sql;
+    unsigned long long fingerprint = 14695981039346656037ULL;
+    sqlite3_int64 totalVisited = 0;
+    int nodeCount = 0, truncated = 0;
+
+    if (!contextPtr->scanStatus || contextPtr->stmt == NULL
+        || !Ns_LogSeverityEnabled(SqliteScanDebugSeverity)) {
+        return;
+    }
+
+    sql = sqlite3_sql(contextPtr->stmt);
+    if (sql == NULL) {
+        sql = "";
+    }
+    for (const unsigned char *p = (const unsigned char *)sql; *p != '\0'; p++) {
+        fingerprint ^= (unsigned long long)*p;
+        fingerprint *= 1099511628211ULL;
+    }
+
+    Tcl_DStringInit(&scans);
+    for (int i = 0; i < MaxScanStatusNodes; i++) {
+        sqlite3_int64 loops = -1, visited = -1, cycles = -1;
+        double estimate = -1.0;
+        const char *name = NULL, *explain = NULL;
+        char nameText[257], explainText[513];
+        char loopsText[32], visitedText[32], cyclesText[32], estimateText[32];
+        Tcl_DString item;
+
+        if (sqlite3_stmt_scanstatus_v2(contextPtr->stmt, i, SQLITE_SCANSTAT_NLOOP,
+                                       SQLITE_SCANSTAT_COMPLEX, &loops) != 0) {
+            break;
+        }
+        (void)sqlite3_stmt_scanstatus_v2(contextPtr->stmt, i, SQLITE_SCANSTAT_NVISIT,
+                                         SQLITE_SCANSTAT_COMPLEX, &visited);
+        (void)sqlite3_stmt_scanstatus_v2(contextPtr->stmt, i, SQLITE_SCANSTAT_NCYCLE,
+                                         SQLITE_SCANSTAT_COMPLEX, &cycles);
+        (void)sqlite3_stmt_scanstatus_v2(contextPtr->stmt, i, SQLITE_SCANSTAT_EST,
+                                         SQLITE_SCANSTAT_COMPLEX, &estimate);
+        (void)sqlite3_stmt_scanstatus_v2(contextPtr->stmt, i, SQLITE_SCANSTAT_NAME,
+                                         SQLITE_SCANSTAT_COMPLEX, &name);
+        (void)sqlite3_stmt_scanstatus_v2(contextPtr->stmt, i, SQLITE_SCANSTAT_EXPLAIN,
+                                         SQLITE_SCANSTAT_COMPLEX, &explain);
+
+        (void)snprintf(nameText, sizeof(nameText), "%.256s", name != NULL ? name : "");
+        (void)snprintf(explainText, sizeof(explainText), "%.512s", explain != NULL ? explain : "");
+        (void)snprintf(loopsText, sizeof(loopsText), "%lld", (long long)loops);
+        (void)snprintf(visitedText, sizeof(visitedText), "%lld", (long long)visited);
+        (void)snprintf(cyclesText, sizeof(cyclesText), "%lld", (long long)cycles);
+        (void)snprintf(estimateText, sizeof(estimateText), "%.3g", estimate);
+        Tcl_DStringInit(&item);
+        Tcl_DStringAppendElement(&item, "name");
+        Tcl_DStringAppendElement(&item, nameText);
+        Tcl_DStringAppendElement(&item, "plan");
+        Tcl_DStringAppendElement(&item, explainText);
+        Tcl_DStringAppendElement(&item, "loops");
+        Tcl_DStringAppendElement(&item, loopsText);
+        Tcl_DStringAppendElement(&item, "rowsVisited");
+        Tcl_DStringAppendElement(&item, visitedText);
+        Tcl_DStringAppendElement(&item, "cycles");
+        Tcl_DStringAppendElement(&item, cyclesText);
+        Tcl_DStringAppendElement(&item, "estimatedRowsPerLoop");
+        Tcl_DStringAppendElement(&item, estimateText);
+        Tcl_DStringAppendElement(&scans, Tcl_DStringValue(&item));
+        Tcl_DStringFree(&item);
+
+        if (visited > 0 && totalVisited <= INT64_MAX - visited) {
+            totalVisited += visited;
+        }
+        nodeCount++;
+    }
+    if (nodeCount == MaxScanStatusNodes) {
+        sqlite3_int64 unused;
+
+        truncated = sqlite3_stmt_scanstatus_v2(contextPtr->stmt, nodeCount,
+                                                SQLITE_SCANSTAT_NLOOP,
+                                                SQLITE_SCANSTAT_COMPLEX, &unused) == 0;
+    }
+
+    Ns_GetTime(&endTime);
+    (void)Ns_DiffTime(&endTime, &contextPtr->scanStartedAt, &elapsed);
+    Ns_Log(SqliteScanDebugSeverity,
+           "nsdbsqlite: pool %s duration " NS_TIME_FMT
+           " secs: query %016llx rowsReturned %lld rowsVisitedSum %lld scans {%s}%s",
+           handle->poolname, (int64_t)elapsed.sec, elapsed.usec, fingerprint,
+           (long long)((Connection *)handle->connection)->nrows, (long long)totalVisited,
+           Tcl_DStringValue(&scans), truncated ? " truncated" : "");
+    Tcl_DStringFree(&scans);
+}
+#endif
+
 static Ns_ReturnCode
 DbCancel(Ns_DbHandle *handle)
 {
@@ -1811,6 +1979,11 @@ DbCancel(Ns_DbHandle *handle)
     handle->statement = NULL;
     handle->fetchingRows = NS_FALSE;
     if (contextPtr != NULL) {
+#ifdef SQLITE_ENABLE_STMT_SCANSTATUS
+        if (contextPtr->scanStatus && !contextPtr->scanStatusLogged) {
+            DbScanStatusLog(handle, contextPtr);
+        }
+#endif
         rc = sqlite3_finalize(contextPtr->stmt);
         ns_free(contextPtr);
     }
@@ -1984,6 +2157,22 @@ DbStatsCollect(Tcl_Interp *interp, Ns_DbHandle *handle, const char *database, bo
         Tcl_DictObjPut(NULL, sqlite, NEW_LITERAL_OBJ("connection"), specific);
         Tcl_DictObjPut(NULL, sqlite, NEW_LITERAL_OBJ("policy"), policy);
     }
+#ifdef SQLITE_ENABLE_STMT_SCANSTATUS
+    {
+        int enabled = 0;
+        int rc = sqlite3_db_config(connection->db, SQLITE_DBCONFIG_STMT_SCANSTATUS, -1, &enabled);
+
+        Tcl_DictObjPut(NULL, policy, NEW_LITERAL_OBJ("statementScanStatusSupported"),
+                       Tcl_NewBooleanObj(NS_TRUE));
+        Tcl_DictObjPut(NULL, policy, NEW_LITERAL_OBJ("statementScanStatus"),
+                       Tcl_NewBooleanObj(rc == SQLITE_OK && enabled != 0));
+    }
+#else
+    Tcl_DictObjPut(NULL, policy, NEW_LITERAL_OBJ("statementScanStatusSupported"),
+                   Tcl_NewBooleanObj(NS_FALSE));
+    Tcl_DictObjPut(NULL, policy, NEW_LITERAL_OBJ("statementScanStatus"),
+                   Tcl_NewBooleanObj(NS_FALSE));
+#endif
     for (size_t i = 0; i < PolicyCount; i++) {
         sqlite3_int64 value;
 
