@@ -519,8 +519,13 @@ Unspecified options retain SQLite defaults (including a file's persistent WAL mo
 | mmapSizeBytes | 0..9223372036854775807 | Memory map limit in bytes |
 | journalSizeLimitBytes | -1..9223372036854775807 | Retained journal/WAL size limit |
 | statementScanStatus | Tcl boolean | Collect SQLite statement scan-status counters on this pool |
+| readOnly | Tcl boolean | Open the existing datasource with SQLITE_OPEN_READONLY; never create it |
 
 Names are case-insensitive. Numeric values are integer counts, not unit strings.
+readOnly defaults to false. A read-only pool cannot create a missing datasource
+or modify the database through SQL. Use it for externally maintained diagnostic
+databases and do not configure journalMode or other write-oriented policies on
+that pool. SQLite may still need access to an existing WAL sidecar for reads.
 `statementScanStatus` defaults to false. It requires a build with
 `SQLITE_STMT_SCANSTATUS=1`; otherwise the driver logs a warning at startup and
 ignores a true setting. `ns_sqlite stats $handle` reports both

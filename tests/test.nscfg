@@ -61,6 +61,21 @@ foreach {pool source} {relative shared.db shared shared.db memory :memory: neste
 
 ns_section ns/db/pools {
     ns_param policies {Pool policy tests}
+    ns_param readonly {Read-only connection tests}
+    ns_param readonly-missing {Missing read-only datasource}
+}
+ns_section ns/db/pool/readonly {
+    ns_param driver sqlite
+    ns_param connections 1
+    ns_param datasource $home/test.db
+    ns_param readOnly true
+    ns_param busyTimeoutMs 100
+}
+ns_section ns/db/pool/readonly-missing {
+    ns_param driver sqlite
+    ns_param connections 1
+    ns_param datasource $home/missing-readonly.db
+    ns_param readOnly true
 }
 ns_section ns/db/pool/policies {
     ns_param driver sqlite
@@ -75,7 +90,7 @@ ns_section ns/db/pool/policies {
     ns_param mmapSizeBytes 0
     ns_param journalSizeLimitBytes 1048576
 }
-ns_set update [ns_configsection ns/server/test/db] pools $testPools,policies,unavailable-policy
+ns_set update [ns_configsection ns/server/test/db] pools $testPools,readonly,readonly-missing,policies,unavailable-policy
 
 ns_section ns/db/pools {
     ns_param unavailable-policy {Unsupported WAL policy test}

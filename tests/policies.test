@@ -1,4 +1,25 @@
 # Pool policies apply on connection creation and reset, without application PRAGMAs.
+test sqlite-readonly-existing {read-only pool reads an existing file and rejects writes} -body {
+    ns_db exec $::h {CREATE TABLE IF NOT EXISTS readonly_probe(value INTEGER)}
+    ns_db flush $::h
+    set db [ns_db gethandle readonly]
+    try {
+        set row [ns_db 1row $db {SELECT name FROM sqlite_master WHERE name='readonly_probe'}]
+        set name [ns_set get $row name]
+        ns_set free $row
+        set rejected [catch {ns_db exec $db {INSERT INTO readonly_probe VALUES (1)}} message]
+        list $name $rejected [string match {*readonly*} [string tolower $message]]
+    } finally {
+        ns_db releasehandle $db
+    }
+} -result {readonly_probe 1 1}
+
+test sqlite-readonly-missing {read-only pool does not create a missing file} -body {
+    set path [ns_config ns/db/pool/readonly-missing datasource]
+    set rejected [catch {ns_db gethandle readonly-missing}]
+    list $rejected [file exists $path]
+} -result {1 0}
+
 test sqlite-pool-policy-open {both handles receive all configured policies} -body {
     set handles [ns_db gethandle policies 2]
     set results {}

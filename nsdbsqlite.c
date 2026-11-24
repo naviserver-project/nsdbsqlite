@@ -1491,13 +1491,25 @@ DbOpen(Ns_DbHandle *handle)
     sqlite3         *db = NULL;
     Connection      *connectionPtr;
     PoolPolicy       policy;
+    const char      *section;
+    const char      *readOnlySetting;
+    bool             readOnly = NS_FALSE;
     int              rc;
 
     if (DbPoolPolicyRead(handle->poolname, &policy) != NS_OK) {
         Ns_DbSetException(handle, "NSDB", "invalid SQLite pool policy");
         return NS_ERROR;
     }
-    rc = sqlite3_open(handle->datasource, &db);
+    section = Ns_ConfigGetPath(NULL, NULL, "db", "pool", handle->poolname, NS_SENTINEL);
+    readOnlySetting = Ns_ConfigGetValue(section, "readOnly");
+    if (readOnlySetting != NULL && !Ns_ConfigGetBool(section, "readOnly", &readOnly)) {
+        Ns_Log(Error, "nsdbsqlite: invalid readOnly value for pool '%s'", handle->poolname);
+        Ns_DbSetException(handle, "NSDB", "invalid readOnly pool setting");
+        return NS_ERROR;
+    }
+    rc = sqlite3_open_v2(handle->datasource, &db,
+                         readOnly ? SQLITE_OPEN_READONLY : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE),
+                         NULL);
 
     if (rc != SQLITE_OK) {
         const char *message = db != NULL ? sqlite3_errmsg(db) : sqlite3_errstr(rc);
